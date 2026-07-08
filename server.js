@@ -218,6 +218,17 @@ app.patch('/api/goals/:id', authenticate, async (req, res) => {
   }
 });
 
+// GET all goals for the authenticated user
+app.get('/api/goals', authenticate, async (req, res) => {
+  try {
+    const goals = await Goal.find({ userId: req.userId }).sort({ createdAt: -1 });
+    res.json(goals);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+
 // ─── PROFILE ROUTES ─────────────────────────────────
 const authorizeProfileAccess = (req, res, next) => {
   if (req.params.userId !== req.userId) return res.status(403).json({ error: 'You can only access your own profile.' });
