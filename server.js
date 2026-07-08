@@ -15,19 +15,43 @@ const MONGODB_URI = process.env.MONGODB_URI || 'mongodb://localhost:27017/finpat
 const JWT_SECRET = process.env.JWT_SECRET || 'your-secret-key-change-in-production';
 const JWT_EXPIRES_IN = process.env.JWT_EXPIRES_IN || '7d';
 
+// ─── Startup sanity check — logs whether the URI even exists ──
+if (!process.env.MONGODB_URI) {
+  console.warn('⚠️  MONGODB_URI env var is NOT set — falling back to localhost, which will fail on Vercel.');
+} else {
+  // Log a redacted version so you can confirm host/db without leaking the password
+  const redacted = MONGODB_URI.replace(/:\/\/([^:]+):([^@]+)@/, '://$1:****@');
+  console.log('🔎 Using MONGODB_URI:', redacted);
+}
+
 // ─── MongoDB Connection (cached across invocations) ──
 let isConnected = false;
 
 async function connectDB() {
   if (isConnected && mongoose.connection.readyState === 1) return;
 
-  await mongoose.connect(MONGODB_URI, {
-    bufferCommands: false,       // fail fast instead of queueing during cold start
-    serverSelectionTimeoutMS: 10000,
-  });
-
-  isConnected = true;
-  console.log('✅ MongoDB connected');
+  try {
+    await mongoose.connect(MONGODB_URI, {
+      bufferCommands: false,
+      serverSelectionTimeoutMS: 10000,
+    });
+    isConnected = true;
+    console.log('✅ MongoDB connected');
+  } catch (err) {
+    isConnected = false;
+    // Surface the REAL reason instead of swallowing it
+    console.error('❌ MongoDB connection failed. Reason:', err.message);
+    if (err.message.includes('bad auth')) {
+      console.error('   → Username or password is wrong, or password needs URL-encoding.');
+    }
+    if (err.message.includes('ENOTFOUND') || err.message.includes('querySrv')) {
+      console.error('   → Cluster hostname is wrong, or the connection string is malformed.');
+    }
+    if (err.message.includes('timed out') || err.message.includes('ETIMEDOUT')) {
+      console.error('   → Likely an IP allow-list issue. Add 0.0.0.0/0 in Atlas Network Access.');
+    }
+    throw err;
+  }
 }
 
 // Gate every request on a live connection
@@ -36,7 +60,6 @@ app.use(async (req, res, next) => {
     await connectDB();
     next();
   } catch (err) {
-    console.error('❌ MongoDB connection failed:', err);
     res.status(503).json({ error: 'Database unavailable. Please try again.' });
   }
 });
@@ -224,14 +247,21 @@ app.put('/api/profile/:userId', authenticate, authorizeProfileAccess, async (req
   }
 });
 
-// Health check
-app.get('/', (req, res) => res.send('FinPath API is running'));
+// Health check — now also reports actual DB status instead of just "running"
+app.get('/', (req, res) => {
+  res.json({
+    message: 'FinPath API is running',
+    dbState: ['disconnected', 'connected', 'connecting', 'disconnecting'][mongoose.connection.readyState] || 'unknown',
+  });
+});
 
 // ─── Local dev only — Vercel ignores this ───────────
 if (process.env.VERCEL !== '1') {
-  connectDB().then(() => {
-    app.listen(PORT, () => console.log(`🚀 Server running on port ${PORT}`));
-  });
+  connectDB()
+    .then(() => {
+      app.listen(PORT, () => console.log(`🚀 Server running on port ${PORT}`));
+    })
+    .catch(() => process.exit(1));
 }
 
 module.exports = app;
