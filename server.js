@@ -18,12 +18,9 @@ const JWT_SECRET = process.env.JWT_SECRET || 'your-secret-key-change-in-producti
 const JWT_EXPIRES_IN = process.env.JWT_EXPIRES_IN || '7d';
 
 // ─── MongoDB Connection ─────────────────────────────
-mongoose.connect(MONGODB_URI, {
-  useNewUrlParser: true,
-  useUnifiedTopology: true,
-})
-.then(() => console.log('✅ MongoDB connected'))
-.catch(err => console.error('❌ MongoDB error:', err));
+mongoose.connect(MONGODB_URI)
+  .then(() => console.log('✅ MongoDB connected'))
+  .catch(err => console.error('❌ MongoDB error:', err));
 
 // ─── User Model (Auth) ──────────────────────────────
 const userSchema = new mongoose.Schema({
@@ -46,7 +43,7 @@ const User = mongoose.model('User', userSchema);
 
 // ─── Profile Model (Financial Data) ─────────────────
 const profileSchema = new mongoose.Schema({
-  userId: { type: String, required: true, unique: true }, // same as the User's _id
+  userId: { type: String, required: true, unique: true },
   age: Number,
   employment: String,
   country: String,
@@ -83,7 +80,7 @@ const authenticate = async (req, res, next) => {
     }
     const token = authHeader.split(' ')[1];
     const decoded = jwt.verify(token, JWT_SECRET);
-    req.userId = decoded.userId; // attach the authenticated user's id
+    req.userId = decoded.userId;
     next();
   } catch (err) {
     res.status(401).json({ error: 'Invalid or expired token.' });
@@ -108,10 +105,14 @@ app.post('/api/auth/signup', async (req, res) => {
     const user = new User({ name, email, password });
     await user.save();
 
-    const token = jwt.sign({ userId: user._id }, process.env.JWT_SECRET, { expiresIn: '7d' });
-    res.status(201).json({ message: 'User created successfully.', token, user: { id: user._id, name, email } });
+    const token = generateToken(user._id);
+    res.status(201).json({
+      message: 'User created successfully.',
+      token,
+      user: { id: user._id, name: user.name, email: user.email },
+    });
   } catch (err) {
-    console.error('SIGNUP ERROR:', err);   // ← this will appear in Vercel logs
+    console.error('SIGNUP ERROR:', err);
     res.status(500).json({ error: 'Server error. Please try again later.' });
   }
 });
@@ -155,7 +156,6 @@ app.get('/api/auth/me', authenticate, async (req, res) => {
 
 // ─── PROFILE ROUTES (Protected) ─────────────────────
 
-// Ensure that the userId in the URL matches the authenticated user
 const authorizeProfileAccess = (req, res, next) => {
   if (req.params.userId !== req.userId) {
     return res.status(403).json({ error: 'You can only access your own profile.' });
@@ -178,7 +178,6 @@ app.get('/api/profile/:userId', authenticate, authorizeProfileAccess, async (req
 app.patch('/api/profile/:userId', authenticate, authorizeProfileAccess, async (req, res) => {
   try {
     const updates = req.body;
-    // Optionally prevent userId from being overwritten
     delete updates.userId;
     const profile = await Profile.findOneAndUpdate(
       { userId: req.params.userId },
