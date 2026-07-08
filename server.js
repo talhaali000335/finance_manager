@@ -108,6 +108,52 @@ const profileSchema = new mongoose.Schema({
 
 const Profile = mongoose.model('Profile', profileSchema);
 
+
+// ─── Goal Model ─────────────────────────────────
+const goalSchema = new mongoose.Schema({
+  userId: { type: String, required: true },
+  goalType: { type: String, enum: ['home', 'car', 'education', 'custom'], required: true },
+  name: { type: String, default: '' },
+  targetAmount: { type: Number, required: true },
+  targetDate: { type: Date, required: true },
+  priority: { type: Number, min: 1, max: 5, default: 3 },
+  // Steps 2 & 3 data (can be updated later)
+  monthlyContribution: { type: Number, default: 0 },
+  existingSavings: { type: Number, default: 0 },
+  autoTransfer: { type: Boolean, default: false },
+  riskTolerance: { type: String, enum: ['conservative', 'balanced', 'aggressive'], default: 'conservative' },
+}, { timestamps: true });
+
+const Goal = mongoose.model('Goal', goalSchema);
+
+// ─── Goal Routes (protected) ────────────────────
+app.post('/api/goals', authenticate, async (req, res) => {
+  try {
+    const goalData = { ...req.body, userId: req.userId };
+    const goal = await Goal.create(goalData);
+    res.status(201).json(goal);
+  } catch (err) {
+    console.error('GOAL CREATE ERROR:', err);
+    res.status(400).json({ error: err.message });
+  }
+});
+
+// Optional: update goal (for later steps)
+app.patch('/api/goals/:id', authenticate, async (req, res) => {
+  try {
+    const goal = await Goal.findOneAndUpdate(
+      { _id: req.params.id, userId: req.userId },
+      { $set: req.body },
+      { new: true, runValidators: true }
+    );
+    if (!goal) return res.status(404).json({ error: 'Goal not found' });
+    res.json(goal);
+  } catch (err) {
+    res.status(400).json({ error: err.message });
+  }
+});
+
+
 // ─── JWT Helpers ────────────────────────────────────
 const generateToken = (userId) => {
   return jwt.sign({ userId }, JWT_SECRET, { expiresIn: JWT_EXPIRES_IN });
