@@ -99,19 +99,19 @@ app.post('/api/auth/signup', async (req, res) => {
     if (!name || !email || !password) {
       return res.status(400).json({ error: 'Name, email, and password are required.' });
     }
+
     const existingUser = await User.findOne({ email });
     if (existingUser) {
       return res.status(409).json({ error: 'Email already registered.' });
     }
+
     const user = new User({ name, email, password });
     await user.save();
-    const token = generateToken(user._id);
-    res.status(201).json({
-      message: 'User created successfully.',
-      token,
-      user: { id: user._id, name: user.name, email: user.email },
-    });
+
+    const token = jwt.sign({ userId: user._id }, process.env.JWT_SECRET, { expiresIn: '7d' });
+    res.status(201).json({ message: 'User created successfully.', token, user: { id: user._id, name, email } });
   } catch (err) {
+    console.error('SIGNUP ERROR:', err);   // ← this will appear in Vercel logs
     res.status(500).json({ error: 'Server error. Please try again later.' });
   }
 });
