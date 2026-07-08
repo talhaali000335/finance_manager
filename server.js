@@ -15,21 +15,19 @@ const MONGODB_URI = process.env.MONGODB_URI || 'mongodb://localhost:27017/finpat
 const JWT_SECRET = process.env.JWT_SECRET || 'your-secret-key-change-in-production';
 const JWT_EXPIRES_IN = process.env.JWT_EXPIRES_IN || '7d';
 
-// ─── Startup sanity check — logs whether the URI even exists ──
-if (!process.env.MONGODB_URI) {
-  console.warn('⚠️  MONGODB_URI env var is NOT set — falling back to localhost, which will fail on Vercel.');
-} else {
-  // Log a redacted version so you can confirm host/db without leaking the password
+// ─── Log redacted URI for debugging ────────────────
+if (process.env.MONGODB_URI) {
   const redacted = MONGODB_URI.replace(/:\/\/([^:]+):([^@]+)@/, '://$1:****@');
   console.log('🔎 Using MONGODB_URI:', redacted);
+} else {
+  console.warn('⚠️  MONGODB_URI env var is NOT set – falling back to localhost');
 }
 
-// ─── MongoDB Connection (cached across invocations) ──
+// ─── MongoDB Connection (cached) ──────────────────
 let isConnected = false;
 
 async function connectDB() {
   if (isConnected && mongoose.connection.readyState === 1) return;
-
   try {
     await mongoose.connect(MONGODB_URI, {
       bufferCommands: false,
@@ -39,22 +37,14 @@ async function connectDB() {
     console.log('✅ MongoDB connected');
   } catch (err) {
     isConnected = false;
-    // Surface the REAL reason instead of swallowing it
-    console.error('❌ MongoDB connection failed. Reason:', err.message);
-    if (err.message.includes('bad auth')) {
-      console.error('   → Username or password is wrong, or password needs URL-encoding.');
-    }
-    if (err.message.includes('ENOTFOUND') || err.message.includes('querySrv')) {
-      console.error('   → Cluster hostname is wrong, or the connection string is malformed.');
-    }
-    if (err.message.includes('timed out') || err.message.includes('ETIMEDOUT')) {
-      console.error('   → Likely an IP allow-list issue. Add 0.0.0.0/0 in Atlas Network Access.');
-    }
+    console.error('❌ MongoDB connection failed:', err.message);
+    if (err.message.includes('bad auth')) console.error('   → Username/password incorrect or needs URL-encoding');
+    if (err.message.includes('ENOTFOUND') || err.message.includes('querySrv')) console.error('   → Cluster hostname wrong');
+    if (err.message.includes('timed out') || err.message.includes('ETIMEDOUT')) console.error('   → IP allow-list issue – add 0.0.0.0/0 in Atlas');
     throw err;
   }
 }
 
-// Gate every request on a live connection
 app.use(async (req, res, next) => {
   try {
     await connectDB();
@@ -64,14 +54,13 @@ app.use(async (req, res, next) => {
   }
 });
 
-// ─── User Model (Auth) ──────────────────────────────
+// ─── User Model ─────────────────────────────────────
 const userSchema = new mongoose.Schema({
   name: { type: String, required: true, trim: true },
   email: { type: String, required: true, unique: true, lowercase: true, trim: true },
   password: { type: String, required: true, minlength: 6 },
 }, { timestamps: true });
 
-// FIXED: async pre-hook, no `next` param/callback
 userSchema.pre('save', async function () {
   if (!this.isModified('password')) return;
   this.password = await bcrypt.hash(this.password, 12);
@@ -83,7 +72,7 @@ userSchema.methods.comparePassword = async function (candidatePassword) {
 
 const User = mongoose.model('User', userSchema);
 
-// ─── Profile Model (Financial Data) ─────────────────
+// ─── Profile Model ──────────────────────────────────
 const profileSchema = new mongoose.Schema({
   userId: { type: String, required: true, unique: true },
   age: Number,
@@ -108,8 +97,7 @@ const profileSchema = new mongoose.Schema({
 
 const Profile = mongoose.model('Profile', profileSchema);
 
-
-// ─── Goal Model ─────────────────────────────────
+// ─── Goal Model ─────────────────────────────────────
 const goalSchema = new mongoose.Schema({
   userId: { type: String, required: true },
   goalType: { type: String, enum: ['home', 'car', 'education', 'custom'], required: true },
@@ -117,7 +105,6 @@ const goalSchema = new mongoose.Schema({
   targetAmount: { type: Number, required: true },
   targetDate: { type: Date, required: true },
   priority: { type: Number, min: 1, max: 5, default: 3 },
-  // Steps 2 & 3 data (can be updated later)
   monthlyContribution: { type: Number, default: 0 },
   existingSavings: { type: Number, default: 0 },
   autoTransfer: { type: Boolean, default: false },
@@ -126,40 +113,12 @@ const goalSchema = new mongoose.Schema({
 
 const Goal = mongoose.model('Goal', goalSchema);
 
-// ─── Goal Routes (protected) ────────────────────
-app.post('/api/goals', authenticate, async (req, res) => {
-  try {
-    const goalData = { ...req.body, userId: req.userId };
-    const goal = await Goal.create(goalData);
-    res.status(201).json(goal);
-  } catch (err) {
-    console.error('GOAL CREATE ERROR:', err);
-    res.status(400).json({ error: err.message });
-  }
-});
-
-// Optional: update goal (for later steps)
-app.patch('/api/goals/:id', authenticate, async (req, res) => {
-  try {
-    const goal = await Goal.findOneAndUpdate(
-      { _id: req.params.id, userId: req.userId },
-      { $set: req.body },
-      { new: true, runValidators: true }
-    );
-    if (!goal) return res.status(404).json({ error: 'Goal not found' });
-    res.json(goal);
-  } catch (err) {
-    res.status(400).json({ error: err.message });
-  }
-});
-
-
 // ─── JWT Helpers ────────────────────────────────────
 const generateToken = (userId) => {
   return jwt.sign({ userId }, JWT_SECRET, { expiresIn: JWT_EXPIRES_IN });
 };
 
-// ─── Auth Middleware (Protected Routes) ─────────────
+// ─── Auth Middleware (must be defined BEFORE routes) ──
 const authenticate = async (req, res, next) => {
   try {
     const authHeader = req.headers.authorization;
@@ -176,23 +135,17 @@ const authenticate = async (req, res, next) => {
 };
 
 // ─── AUTH ROUTES ────────────────────────────────────
-
-// SIGNUP
 app.post('/api/auth/signup', async (req, res) => {
   try {
     const { name, email, password } = req.body;
     if (!name || !email || !password) {
       return res.status(400).json({ error: 'Name, email, and password are required.' });
     }
-
     const existingUser = await User.findOne({ email });
-    if (existingUser) {
-      return res.status(409).json({ error: 'Email already registered.' });
-    }
+    if (existingUser) return res.status(409).json({ error: 'Email already registered.' });
 
     const user = new User({ name, email, password });
     await user.save();
-
     const token = generateToken(user._id);
     res.status(201).json({
       message: 'User created successfully.',
@@ -205,7 +158,6 @@ app.post('/api/auth/signup', async (req, res) => {
   }
 });
 
-// LOGIN
 app.post('/api/auth/login', async (req, res) => {
   try {
     const { email, password } = req.body;
@@ -213,13 +165,11 @@ app.post('/api/auth/login', async (req, res) => {
       return res.status(400).json({ error: 'Email and password are required.' });
     }
     const user = await User.findOne({ email });
-    if (!user) {
-      return res.status(401).json({ error: 'Invalid email or password.' });
-    }
+    if (!user) return res.status(401).json({ error: 'Invalid email or password.' });
+
     const isMatch = await user.comparePassword(password);
-    if (!isMatch) {
-      return res.status(401).json({ error: 'Invalid email or password.' });
-    }
+    if (!isMatch) return res.status(401).json({ error: 'Invalid email or password.' });
+
     const token = generateToken(user._id);
     res.json({
       message: 'Login successful.',
@@ -227,11 +177,11 @@ app.post('/api/auth/login', async (req, res) => {
       user: { id: user._id, name: user.name, email: user.email },
     });
   } catch (err) {
+    console.error('LOGIN ERROR:', err);
     res.status(500).json({ error: 'Server error. Please try again later.' });
   }
 });
 
-// GET current user (protected)
 app.get('/api/auth/me', authenticate, async (req, res) => {
   try {
     const user = await User.findById(req.userId).select('-password');
@@ -242,16 +192,38 @@ app.get('/api/auth/me', authenticate, async (req, res) => {
   }
 });
 
-// ─── PROFILE ROUTES (Protected) ─────────────────────
-
-const authorizeProfileAccess = (req, res, next) => {
-  if (req.params.userId !== req.userId) {
-    return res.status(403).json({ error: 'You can only access your own profile.' });
+// ─── GOAL ROUTES ────────────────────────────────────
+app.post('/api/goals', authenticate, async (req, res) => {
+  try {
+    const goalData = { ...req.body, userId: req.userId };
+    const goal = await Goal.create(goalData);
+    res.status(201).json(goal);
+  } catch (err) {
+    console.error('GOAL CREATE ERROR:', err);
+    res.status(400).json({ error: err.message });
   }
+});
+
+app.patch('/api/goals/:id', authenticate, async (req, res) => {
+  try {
+    const goal = await Goal.findOneAndUpdate(
+      { _id: req.params.id, userId: req.userId },
+      { $set: req.body },
+      { new: true, runValidators: true }
+    );
+    if (!goal) return res.status(404).json({ error: 'Goal not found' });
+    res.json(goal);
+  } catch (err) {
+    res.status(400).json({ error: err.message });
+  }
+});
+
+// ─── PROFILE ROUTES ─────────────────────────────────
+const authorizeProfileAccess = (req, res, next) => {
+  if (req.params.userId !== req.userId) return res.status(403).json({ error: 'You can only access your own profile.' });
   next();
 };
 
-// GET profile
 app.get('/api/profile/:userId', authenticate, authorizeProfileAccess, async (req, res) => {
   try {
     const profile = await Profile.findOne({ userId: req.params.userId });
@@ -262,7 +234,6 @@ app.get('/api/profile/:userId', authenticate, authorizeProfileAccess, async (req
   }
 });
 
-// PATCH profile (partial update)
 app.patch('/api/profile/:userId', authenticate, authorizeProfileAccess, async (req, res) => {
   try {
     const updates = req.body;
@@ -278,7 +249,6 @@ app.patch('/api/profile/:userId', authenticate, authorizeProfileAccess, async (r
   }
 });
 
-// PUT profile (full replace)
 app.put('/api/profile/:userId', authenticate, authorizeProfileAccess, async (req, res) => {
   try {
     const profileData = { ...req.body, userId: req.params.userId };
@@ -293,7 +263,7 @@ app.put('/api/profile/:userId', authenticate, authorizeProfileAccess, async (req
   }
 });
 
-// Health check — now also reports actual DB status instead of just "running"
+// ─── Health check ───────────────────────────────────
 app.get('/', (req, res) => {
   res.json({
     message: 'FinPath API is running',
@@ -301,13 +271,5 @@ app.get('/', (req, res) => {
   });
 });
 
-// ─── Local dev only — Vercel ignores this ───────────
-if (process.env.VERCEL !== '1') {
-  connectDB()
-    .then(() => {
-      app.listen(PORT, () => console.log(`🚀 Server running on port ${PORT}`));
-    })
-    .catch(() => process.exit(1));
-}
-
+// ─── Export for Vercel ──────────────────────────────
 module.exports = app;
