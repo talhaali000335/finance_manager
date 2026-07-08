@@ -7,20 +7,39 @@ require('dotenv').config();
 
 const app = express();
 
-// Middleware
 app.use(cors());
 app.use(express.json());
 
-// ─── Environment Variables ──────────────────────────
 const PORT = process.env.PORT || 3000;
 const MONGODB_URI = process.env.MONGODB_URI || 'mongodb://localhost:27017/finpath';
 const JWT_SECRET = process.env.JWT_SECRET || 'your-secret-key-change-in-production';
 const JWT_EXPIRES_IN = process.env.JWT_EXPIRES_IN || '7d';
 
-// ─── MongoDB Connection ─────────────────────────────
-mongoose.connect(MONGODB_URI)
-  .then(() => console.log('✅ MongoDB connected'))
-  .catch(err => console.error('❌ MongoDB error:', err));
+// ─── MongoDB Connection (cached across invocations) ──
+let isConnected = false;
+
+async function connectDB() {
+  if (isConnected && mongoose.connection.readyState === 1) return;
+
+  await mongoose.connect(MONGODB_URI, {
+    bufferCommands: false,       // fail fast instead of queueing during cold start
+    serverSelectionTimeoutMS: 10000,
+  });
+
+  isConnected = true;
+  console.log('✅ MongoDB connected');
+}
+
+// Gate every request on a live connection
+app.use(async (req, res, next) => {
+  try {
+    await connectDB();
+    next();
+  } catch (err) {
+    console.error('❌ MongoDB connection failed:', err);
+    res.status(503).json({ error: 'Database unavailable. Please try again.' });
+  }
+});
 
 // ─── User Model (Auth) ──────────────────────────────
 const userSchema = new mongoose.Schema({
@@ -208,18 +227,11 @@ app.put('/api/profile/:userId', authenticate, authorizeProfileAccess, async (req
 // Health check
 app.get('/', (req, res) => res.send('FinPath API is running'));
 
-async function startServer() {
-  try {
-    // Wait until the database is actually connected
-    await mongoose.connect(MONGODB_URI);
-    console.log('✅ MongoDB connected');
-
-    // Only then start accepting requests
+// ─── Local dev only — Vercel ignores this ───────────
+if (process.env.VERCEL !== '1') {
+  connectDB().then(() => {
     app.listen(PORT, () => console.log(`🚀 Server running on port ${PORT}`));
-  } catch (err) {
-    console.error('❌ MongoDB connection failed:', err);
-    process.exit(1); // crash the function so Vercel can report the error
-  }
+  });
 }
 
-startServer();
+module.exports = app;
