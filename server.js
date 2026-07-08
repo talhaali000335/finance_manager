@@ -274,6 +274,73 @@ app.put('/api/profile/:userId', authenticate, authorizeProfileAccess, async (req
   }
 });
 
+
+
+
+
+// GET /api/action-plan – returns monthly tasks and progress
+app.get('/api/action-plan', authenticate, async (req, res) => {
+  try {
+    const profile = await Profile.findOne({ userId: req.userId });
+    const goals = await Goal.find({ userId: req.userId });
+
+    // Example logic: use the highest‑priority goal to generate a 24‑month plan
+    const now = new Date();
+    const startMonth = new Date(profile?.createdAt || now).getMonth(); // month user joined
+    const totalMonths = 24;
+    const monthsElapsed = Math.min(
+      Math.floor((now - new Date(profile?.createdAt || now)) / (30 * 24 * 3600 * 1000)),
+      totalMonths
+    );
+    const progress = monthsElapsed / totalMonths;
+
+    // Generate monthly tasks for the current month
+    const currentMonthTasks = [];
+    const primaryGoal = goals.sort((a, b) => (b.priority || 0) - (a.priority || 0))[0];
+
+    if (primaryGoal) {
+      const neededMonthly = Math.ceil((primaryGoal.targetAmount - (primaryGoal.existingSavings || 0)) / totalMonths);
+      currentMonthTasks.push({
+        title: `Save \$${neededMonthly} to House Fund`,
+        description: `Keeps you aligned for the Q4 down payment target.`,
+        hasInfo: true,
+        spending: null,
+      });
+      currentMonthTasks.push({
+        title: `Move \$${Math.ceil(neededMonthly * 0.4)} to Business Seed Account`,
+        description: 'Scheduled automated transfer.',
+        hasInfo: false,
+        spending: null,
+      });
+      // Use the user's monthly income for a spending limit
+      const monthlyIncome = (profile?.primarySalary || 0) + (profile?.sideIncome || 0);
+      const spendingLimit = Math.ceil(monthlyIncome * 0.3);
+      currentMonthTasks.push({
+        title: `Review discretionary spending (limit to \$${spendingLimit})`,
+        description: '',
+        hasInfo: false,
+        spending: {
+          spent: Math.ceil(spendingLimit * 0.85), // mock 85% spent
+          limit: spendingLimit,
+        },
+      });
+    }
+
+    res.json({
+      currentPhase: `Month ${monthsElapsed + 1} of ${totalMonths}`,
+      progress: progress, // 0..1
+      status: progress >= 0.8 ? 'On Schedule' : 'Behind',
+      tasks: currentMonthTasks,
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+
+
+
+
 // ─── Health check ───────────────────────────────────
 app.get('/', (req, res) => {
   res.json({
