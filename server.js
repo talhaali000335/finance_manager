@@ -208,5 +208,18 @@ app.put('/api/profile/:userId', authenticate, authorizeProfileAccess, async (req
 // Health check
 app.get('/', (req, res) => res.send('FinPath API is running'));
 
-// Start server
-app.listen(PORT, () => console.log(`🚀 Server running on port ${PORT}`));
+async function startServer() {
+  try {
+    // Wait until the database is actually connected
+    await mongoose.connect(MONGODB_URI);
+    console.log('✅ MongoDB connected');
+
+    // Only then start accepting requests
+    app.listen(PORT, () => console.log(`🚀 Server running on port ${PORT}`));
+  } catch (err) {
+    console.error('❌ MongoDB connection failed:', err);
+    process.exit(1); // crash the function so Vercel can report the error
+  }
+}
+
+startServer();
