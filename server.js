@@ -15,7 +15,7 @@ const MONGODB_URI = process.env.MONGODB_URI || 'mongodb://localhost:27017/finpat
 const JWT_SECRET = process.env.JWT_SECRET || 'your-secret-key-change-in-production';
 const JWT_EXPIRES_IN = process.env.JWT_EXPIRES_IN || '7d';
 
-// ─── Log redacted URI for debugging ────────────────
+// ─── Log a safe version of the URI ──────────────────
 if (process.env.MONGODB_URI) {
   const redacted = MONGODB_URI.replace(/:\/\/([^:]+):([^@]+)@/, '://$1:****@');
   console.log('🔎 Using MONGODB_URI:', redacted);
@@ -23,20 +23,23 @@ if (process.env.MONGODB_URI) {
   console.warn('⚠️  MONGODB_URI env var is NOT set – falling back to localhost');
 }
 
-// ─── MongoDB Connection (cached) ──────────────────
-let isConnected = false;
+// ─── MongoDB connection (cached across invocations) ──
+let cachedConnection = null;
 
 async function connectDB() {
-  if (isConnected && mongoose.connection.readyState === 1) return;
+  if (cachedConnection && mongoose.connection.readyState === 1) {
+    return cachedConnection;
+  }
   try {
-    await mongoose.connect(MONGODB_URI, {
+    const conn = await mongoose.connect(MONGODB_URI, {
       bufferCommands: false,
       serverSelectionTimeoutMS: 10000,
     });
-    isConnected = true;
+    cachedConnection = conn;
     console.log('✅ MongoDB connected');
+    return conn;
   } catch (err) {
-    isConnected = false;
+    cachedConnection = null;
     console.error('❌ MongoDB connection failed:', err.message);
     if (err.message.includes('bad auth')) console.error('   → Username/password incorrect or needs URL-encoding');
     if (err.message.includes('ENOTFOUND') || err.message.includes('querySrv')) console.error('   → Cluster hostname wrong');
@@ -45,6 +48,7 @@ async function connectDB() {
   }
 }
 
+// Gate every request on a live connection
 app.use(async (req, res, next) => {
   try {
     await connectDB();
@@ -118,7 +122,7 @@ const generateToken = (userId) => {
   return jwt.sign({ userId }, JWT_SECRET, { expiresIn: JWT_EXPIRES_IN });
 };
 
-// ─── Auth Middleware (must be defined BEFORE routes) ──
+// ─── Auth Middleware ─────────────────────────────────
 const authenticate = async (req, res, next) => {
   try {
     const authHeader = req.headers.authorization;
@@ -218,7 +222,6 @@ app.patch('/api/goals/:id', authenticate, async (req, res) => {
   }
 });
 
-// GET all goals for the authenticated user
 app.get('/api/goals', authenticate, async (req, res) => {
   try {
     const goals = await Goal.find({ userId: req.userId }).sort({ createdAt: -1 });
@@ -227,7 +230,6 @@ app.get('/api/goals', authenticate, async (req, res) => {
     res.status(500).json({ error: err.message });
   }
 });
-
 
 // ─── PROFILE ROUTES ─────────────────────────────────
 const authorizeProfileAccess = (req, res, next) => {
@@ -274,19 +276,13 @@ app.put('/api/profile/:userId', authenticate, authorizeProfileAccess, async (req
   }
 });
 
-
-
-
-
-// GET /api/action-plan – returns monthly tasks and progress
+// ─── ACTION PLAN ENDPOINT ───────────────────────────
 app.get('/api/action-plan', authenticate, async (req, res) => {
   try {
     const profile = await Profile.findOne({ userId: req.userId });
     const goals = await Goal.find({ userId: req.userId });
 
-    // Example logic: use the highest‑priority goal to generate a 24‑month plan
     const now = new Date();
-    const startMonth = new Date(profile?.createdAt || now).getMonth(); // month user joined
     const totalMonths = 24;
     const monthsElapsed = Math.min(
       Math.floor((now - new Date(profile?.createdAt || now)) / (30 * 24 * 3600 * 1000)),
@@ -294,12 +290,13 @@ app.get('/api/action-plan', authenticate, async (req, res) => {
     );
     const progress = monthsElapsed / totalMonths;
 
-    // Generate monthly tasks for the current month
     const currentMonthTasks = [];
     const primaryGoal = goals.sort((a, b) => (b.priority || 0) - (a.priority || 0))[0];
 
     if (primaryGoal) {
-      const neededMonthly = Math.ceil((primaryGoal.targetAmount - (primaryGoal.existingSavings || 0)) / totalMonths);
+      const neededMonthly = Math.ceil(
+        (primaryGoal.targetAmount - (primaryGoal.existingSavings || 0)) / totalMonths
+      );
       currentMonthTasks.push({
         title: `Save \$${neededMonthly} to House Fund`,
         description: `Keeps you aligned for the Q4 down payment target.`,
@@ -312,15 +309,17 @@ app.get('/api/action-plan', authenticate, async (req, res) => {
         hasInfo: false,
         spending: null,
       });
-      // Use the user's monthly income for a spending limit
-      const monthlyIncome = (profile?.primarySalary || 0) + (profile?.sideIncome || 0);
-      const spendingLimit = Math.ceil(monthlyIncome * 0.3);
+
+      // Prefer the goal’s own monthlyContribution as the spending limit, otherwise use income
+      const spendingLimit = primaryGoal.monthlyContribution > 0
+        ? primaryGoal.monthlyContribution
+        : Math.ceil(((profile?.primarySalary || 0) + (profile?.sideIncome || 0)) * 0.3);
       currentMonthTasks.push({
         title: `Review discretionary spending (limit to \$${spendingLimit})`,
         description: '',
         hasInfo: false,
         spending: {
-          spent: Math.ceil(spendingLimit * 0.85), // mock 85% spent
+          spent: Math.ceil(spendingLimit * 0.85),
           limit: spendingLimit,
         },
       });
@@ -328,7 +327,7 @@ app.get('/api/action-plan', authenticate, async (req, res) => {
 
     res.json({
       currentPhase: `Month ${monthsElapsed + 1} of ${totalMonths}`,
-      progress: progress, // 0..1
+      progress: progress,
       status: progress >= 0.8 ? 'On Schedule' : 'Behind',
       tasks: currentMonthTasks,
     });
@@ -336,10 +335,6 @@ app.get('/api/action-plan', authenticate, async (req, res) => {
     res.status(500).json({ error: err.message });
   }
 });
-
-
-
-
 
 // ─── Health check ───────────────────────────────────
 app.get('/', (req, res) => {
