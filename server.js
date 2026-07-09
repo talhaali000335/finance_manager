@@ -5,7 +5,6 @@ const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
 require('dotenv').config();
 
-
 const app = express();
 
 app.use(cors());
@@ -81,7 +80,7 @@ const User = mongoose.model('User', userSchema);
 const linkedAccountSchema = new mongoose.Schema({
   userId:          { type: String, required: true },
   institutionName: { type: String, required: true },
-  accountType:     { type: String, default: 'checking' }, // checking, savings, ira, brokerage
+  accountType:     { type: String, default: 'checking' },
   lastFour:        { type: String, default: '0000' },
   balance:         { type: Number, default: 0 },
   logoUrl:         { type: String, default: '' },
@@ -89,7 +88,7 @@ const linkedAccountSchema = new mongoose.Schema({
 
 const LinkedAccount = mongoose.model('LinkedAccount', linkedAccountSchema);
 
-// ─── Profile Model ──────────────────────────────────
+// ─── Profile Model (added completedTasks field) ─────
 const profileSchema = new mongoose.Schema({
   userId: { type: String, required: true, unique: true },
   age: Number,
@@ -110,10 +109,10 @@ const profileSchema = new mongoose.Schema({
   transport: Number,
   entertainment: Number,
   completedSteps: { type: Number, default: 0, max: 5 },
+  completedTasks: [{ type: String }],   // <-- NEW field for action plan task tracking
 }, { timestamps: true });
 
 const Profile = mongoose.model('Profile', profileSchema);
-
 
 // ─── Goal Model ─────────────────────────────────────
 const goalSchema = new mongoose.Schema({
@@ -131,7 +130,6 @@ const goalSchema = new mongoose.Schema({
 
 const Goal = mongoose.model('Goal', goalSchema);
 
-
 // ─── Tax Analysis Model (optional cache) ──────────
 const taxAnalysisSchema = new mongoose.Schema({
   userId:        { type: String, required: true, unique: true },
@@ -147,7 +145,6 @@ const TaxAnalysis = mongoose.model('TaxAnalysis', taxAnalysisSchema);
 
 // Helper: compute US federal income tax (simplified, single filer 2024)
 function computeFederalTax(income) {
-  // 2024 brackets
   const brackets = [
     { min: 0, max: 11600, rate: 0.10 },
     { min: 11601, max: 47150, rate: 0.12 },
@@ -168,7 +165,6 @@ function computeFederalTax(income) {
 }
 
 function computeNYStateTax(income) {
-  // Simplified NY (approx 6%)
   return income * 0.06;
 }
 
@@ -181,18 +177,8 @@ function computeFICA(income) {
 }
 
 function computeLocalTax(income) {
-  return income * 0.015; // approx NYC
+  return income * 0.015;
 }
-
-
-
-
-
-
-
-
-
-
 
 // ─── JWT Helpers ────────────────────────────────────
 const generateToken = (userId) => {
@@ -308,8 +294,6 @@ app.get('/api/goals', authenticate, async (req, res) => {
   }
 });
 
-
-// GET a single goal by ID (must belong to authenticated user)
 app.get('/api/goals/:id', authenticate, async (req, res) => {
   try {
     const goal = await Goal.findOne({ _id: req.params.id, userId: req.userId });
@@ -365,7 +349,7 @@ app.put('/api/profile/:userId', authenticate, authorizeProfileAccess, async (req
   }
 });
 
-// ─── ACTION PLAN ENDPOINT ───────────────────────────
+// ─── ACTION PLAN ENDPOINT (UPDATED) ─────────────────
 app.get('/api/action-plan', authenticate, async (req, res) => {
   try {
     const profile = await Profile.findOne({ userId: req.userId });
@@ -379,38 +363,52 @@ app.get('/api/action-plan', authenticate, async (req, res) => {
     );
     const progress = monthsElapsed / totalMonths;
 
+    // Completed task set for this user
+    const completedSet = new Set(profile?.completedTasks ?? []);
+
     const currentMonthTasks = [];
     const primaryGoal = goals.sort((a, b) => (b.priority || 0) - (a.priority || 0))[0];
 
     if (primaryGoal) {
+      const goalName = primaryGoal.name || primaryGoal.goalType;
       const neededMonthly = Math.ceil(
         (primaryGoal.targetAmount - (primaryGoal.existingSavings || 0)) / totalMonths
       );
+
+      // Task 1
+      const saveTaskTitle = `Save \$${neededMonthly} to ${goalName}`;
       currentMonthTasks.push({
-        title: `Save \$${neededMonthly} to House Fund`,
-        description: `Keeps you aligned for the Q4 down payment target.`,
+        title: saveTaskTitle,
+        description: `Keeps you aligned for your ${goalName} target.`,
         hasInfo: true,
         spending: null,
+        completed: completedSet.has(saveTaskTitle),
       });
+
+      // Task 2
+      const moveTaskTitle = `Move \$${Math.ceil(neededMonthly * 0.4)} to Business Seed Account`;
       currentMonthTasks.push({
-        title: `Move \$${Math.ceil(neededMonthly * 0.4)} to Business Seed Account`,
+        title: moveTaskTitle,
         description: 'Scheduled automated transfer.',
         hasInfo: false,
         spending: null,
+        completed: completedSet.has(moveTaskTitle),
       });
 
-      // Prefer the goal’s own monthlyContribution as the spending limit, otherwise use income
+      // Task 3
       const spendingLimit = primaryGoal.monthlyContribution > 0
         ? primaryGoal.monthlyContribution
         : Math.ceil(((profile?.primarySalary || 0) + (profile?.sideIncome || 0)) * 0.3);
+      const spendTaskTitle = `Review discretionary spending (limit to \$${spendingLimit})`;
       currentMonthTasks.push({
-        title: `Review discretionary spending (limit to \$${spendingLimit})`,
+        title: spendTaskTitle,
         description: '',
         hasInfo: false,
         spending: {
           spent: Math.ceil(spendingLimit * 0.85),
           limit: spendingLimit,
         },
+        completed: completedSet.has(spendTaskTitle),
       });
     }
 
@@ -425,7 +423,25 @@ app.get('/api/action-plan', authenticate, async (req, res) => {
   }
 });
 
-// GET /api/tax-analysis
+// ─── MARK TASK AS DONE ──────────────────────────────
+app.post('/api/action-plan/task-done', authenticate, async (req, res) => {
+  try {
+    const { taskTitle } = req.body;
+    if (!taskTitle) return res.status(400).json({ error: 'Missing taskTitle' });
+
+    await Profile.findOneAndUpdate(
+      { userId: req.userId },
+      { $addToSet: { completedTasks: taskTitle } },
+      { new: true, upsert: true }
+    );
+
+    res.json({ success: true });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ─── TAX ANALYSIS ────────────────────────────────────
 app.get('/api/tax-analysis', authenticate, async (req, res) => {
   try {
     const profile = await Profile.findOne({ userId: req.userId });
@@ -433,16 +449,18 @@ app.get('/api/tax-analysis', authenticate, async (req, res) => {
 
     const income = (profile.primarySalary || 0) + (profile.sideIncome || 0);
     const federal = computeFederalTax(income);
-    const state = computeNYStateTax(income); // could be personalised later
+    const state = computeNYStateTax(income);
     const fica = computeFICA(income);
     const local = computeLocalTax(income);
     const annualTax = federal + state + fica + local;
     const effectiveRate = income > 0 ? (annualTax / income) * 100 : 0;
-    // marginal rate: from federal bracket
     let marginalRate = 0.10;
     const brackets = [11600,47150,100525,191950,243725,609350,Infinity];
     for (const b of brackets) {
-      if (income <= b) { marginalRate = b === 11600 ? 0.10 : (b === 47150 ? 0.12 : b === 100525 ? 0.22 : b === 191950 ? 0.24 : b === 243725 ? 0.32 : b === 609350 ? 0.35 : 0.37); break; }
+      if (income <= b) {
+        marginalRate = b === 11600 ? 0.10 : (b === 47150 ? 0.12 : b === 100525 ? 0.22 : b === 191950 ? 0.24 : b === 243725 ? 0.32 : b === 609350 ? 0.35 : 0.37);
+        break;
+      }
     }
 
     res.json({
@@ -473,93 +491,7 @@ app.get('/api/tax-analysis', authenticate, async (req, res) => {
   }
 });
 
-
-
-
-
-
-
-
-// ─── Health check ───────────────────────────────────
-app.get('/', (req, res) => {
-  res.json({
-    message: 'FinPath API is running',
-    dbState: ['disconnected', 'connected', 'connecting', 'disconnecting'][mongoose.connection.readyState] || 'unknown',
-  });
-});
-
-// After your existing routes, before module.exports:
-app.post('/api/chat', authenticate, async (req, res) => {
-  try {
-    const { messages, userData } = req.body;
-
-    // Validate messages array
-    if (!Array.isArray(messages) || messages.length === 0) {
-      return res.status(400).json({ error: 'messages must be a non-empty array' });
-    }
-
-    // Build system prompt
-    const systemPrompt = `
-You are a helpful, personal financial advisor.
-Use the following real user data to give precise, actionable advice.
-Never make up numbers – refer to the data provided.
-
-USER PROFILE:
-- Net worth: $${userData.netWorth ?? 0}
-- Monthly income: $${userData.monthlyIncome ?? 0}
-- Monthly expenses: $${userData.monthlyExpenses ?? 0}
-- Goals: ${JSON.stringify(userData.goals ?? [])}
-- Achievements: ${JSON.stringify(userData.achievements ?? [])}
-
-Answer the user's question concisely and helpfully.
-`.trim();
-
-    // Combine system prompt with user messages
-    const userMessages = messages.map(m => m.content || '').join('\n');
-    const fullPrompt = systemPrompt + '\n\n' + userMessages;
-
-    const apiKey = process.env.GEMINI_API_KEY;
-    if (!apiKey) throw new Error('Missing GEMINI_API_KEY in environment');
-
-    // Use a current model name (gemini-2.5-flash is latest as of mid-2026)
-    // You can also make this an env variable: MODEL_NAME
-    const model = 'gemini-2.5-flash'; // change if needed
-
-    const response = await fetch(
-      `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`,
-      {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          contents: [
-            {
-              role: 'user',
-              parts: [{ text: fullPrompt }]
-            }
-          ]
-        })
-      }
-    );
-
-    const data = await response.json();
-
-    // Check for HTTP-level errors
-    if (!response.ok) {
-      console.error('Gemini API error:', data);
-      throw new Error(data.error?.message || `Gemini returned status ${response.status}`);
-    }
-
-    // Extract reply
-    const reply = data.candidates?.[0]?.content?.parts?.[0]?.text
-                  ?? 'I could not generate a response. Please try again.';
-
-    res.json({ reply });
-  } catch (err) {
-    console.error('CHAT ERROR:', err);
-    res.status(500).json({ error: err.message });
-  }
-});
-// ─── Cash Flow Endpoint ─────────────────────────────
+// ─── CASH FLOW ENDPOINT (STABLE TREND, NO RANDOM) ────
 app.get('/api/cash-flow', authenticate, async (req, res) => {
   try {
     const profile = await Profile.findOne({ userId: req.userId });
@@ -569,27 +501,28 @@ app.get('/api/cash-flow', authenticate, async (req, res) => {
     const expenses = (profile.rent || 0) + (profile.food || 0) + (profile.transport || 0) + (profile.entertainment || 0) + (profile.monthlyEMI || 0);
     const netBalance = income - expenses;
 
-    // Generate realistic 6-month trend (simulated)
+    // Stable 6-month trend: income increases by 2% each month, expenses slightly wave
     const months = ['MAY','JUN','JUL','AUG','SEP','OCT'];
     const trend = months.map((month, idx) => {
-      const variation = (Math.random() * 0.2) - 0.1; // ±10%
+      const factor = 1 + idx * 0.02;
+      const incomeVal = Math.round(income * factor);
+      const expenseVal = Math.round(expenses * (1 + (idx - 2) * 0.01));
       return {
         month,
-        income: Math.round(income * (1 + variation * (idx/5))),
-        expense: Math.round(expenses * (1 + variation * ((5-idx)/5))),
+        income: incomeVal,
+        expense: expenseVal,
       };
     });
 
-    // Breakdown
     const breakdown = [
       { category: 'Salary', icon: 'work', amount: profile.primarySalary || 0, type: 'income', changePercent: 0 },
       { category: 'Side Income', icon: 'work', amount: profile.sideIncome || 0, type: 'income', changePercent: 0 },
       { category: 'Rent', icon: 'home', amount: profile.rent || 0, type: 'expense', changePercent: 0 },
       { category: 'Food & Dining', icon: 'restaurant', amount: profile.food || 0, type: 'expense', changePercent: 12 },
       { category: 'Transport', icon: 'directions_car', amount: profile.transport || 0, type: 'expense', changePercent: 0 },
-      { category: 'Entertainment', icon: 'theater_comedy', amount: profile.entertainment || 0, type: 'expense', changePercent: 0 },
-      { category: 'Subscriptions', icon: 'subscriptions', amount: 120, type: 'expense', changePercent: -5 }, // hardcoded
-    ].filter(item => item.amount > 0); // only show non-zero
+      { category: 'Entertainment', icon: 'theater_comedy', amount: profile.entertainment || 0, type: 'expense', changePercent: -5 },
+      { category: 'Subscriptions', icon: 'subscriptions', amount: 120, type: 'expense', changePercent: -5 },
+    ].filter(item => item.amount > 0);
 
     res.json({
       netBalance,
@@ -603,9 +536,7 @@ app.get('/api/cash-flow', authenticate, async (req, res) => {
   }
 });
 
-// ─── linked Account user ──────────────────────────────
-
-// GET all linked accounts for the user
+// ─── LINKED ACCOUNTS ROUTES ──────────────────────────
 app.get('/api/linked-accounts', authenticate, async (req, res) => {
   try {
     const accounts = await LinkedAccount.find({ userId: req.userId }).sort({ createdAt: -1 });
@@ -615,7 +546,6 @@ app.get('/api/linked-accounts', authenticate, async (req, res) => {
   }
 });
 
-// POST a new linked account (simulated for now – replace with Plaid later)
 app.post('/api/linked-accounts', authenticate, async (req, res) => {
   try {
     const { institutionName, accountType, lastFour, balance, logoUrl } = req.body;
@@ -634,7 +564,6 @@ app.post('/api/linked-accounts', authenticate, async (req, res) => {
   }
 });
 
-// DELETE an account
 app.delete('/api/linked-accounts/:id', authenticate, async (req, res) => {
   try {
     const account = await LinkedAccount.findOneAndDelete({ _id: req.params.id, userId: req.userId });
@@ -642,6 +571,70 @@ app.delete('/api/linked-accounts/:id', authenticate, async (req, res) => {
     res.json({ message: 'Account removed' });
   } catch (err) {
     res.status(400).json({ error: err.message });
+  }
+});
+
+// ─── Health check ───────────────────────────────────
+app.get('/', (req, res) => {
+  res.json({
+    message: 'FinPath API is running',
+    dbState: ['disconnected', 'connected', 'connecting', 'disconnecting'][mongoose.connection.readyState] || 'unknown',
+  });
+});
+
+// ─── Gemini Chat Endpoint ───────────────────────────
+app.post('/api/chat', authenticate, async (req, res) => {
+  try {
+    const { messages, userData } = req.body;
+    if (!Array.isArray(messages) || messages.length === 0) {
+      return res.status(400).json({ error: 'messages must be a non-empty array' });
+    }
+
+    const systemPrompt = `
+You are a helpful, personal financial advisor.
+Use the following real user data to give precise, actionable advice.
+Never make up numbers – refer to the data provided.
+
+USER PROFILE:
+- Net worth: $${userData.netWorth ?? 0}
+- Monthly income: $${userData.monthlyIncome ?? 0}
+- Monthly expenses: $${userData.monthlyExpenses ?? 0}
+- Goals: ${JSON.stringify(userData.goals ?? [])}
+- Achievements: ${JSON.stringify(userData.achievements ?? [])}
+
+Answer the user's question concisely and helpfully.
+`.trim();
+
+    const userMessages = messages.map(m => m.content || '').join('\n');
+    const fullPrompt = systemPrompt + '\n\n' + userMessages;
+
+    const apiKey = process.env.GEMINI_API_KEY;
+    if (!apiKey) throw new Error('Missing GEMINI_API_KEY');
+
+    const model = 'gemini-2.5-flash';
+    const response = await fetch(
+      `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          contents: [{ role: 'user', parts: [{ text: fullPrompt }] }]
+        })
+      }
+    );
+
+    const data = await response.json();
+    if (!response.ok) {
+      console.error('Gemini API error:', data);
+      throw new Error(data.error?.message || `Gemini returned status ${response.status}`);
+    }
+
+    const reply = data.candidates?.[0]?.content?.parts?.[0]?.text
+                  ?? 'I could not generate a response. Please try again.';
+    res.json({ reply });
+  } catch (err) {
+    console.error('CHAT ERROR:', err);
+    res.status(500).json({ error: err.message });
   }
 });
 
