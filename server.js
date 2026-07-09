@@ -547,6 +547,48 @@ Answer the user's question concisely and helpfully.
     res.status(500).json({ error: err.message });
   }
 });
+// ─── Cash Flow Endpoint ─────────────────────────────
+app.get('/api/cash-flow', authenticate, async (req, res) => {
+  try {
+    const profile = await Profile.findOne({ userId: req.userId });
+    if (!profile) return res.status(404).json({ error: 'Profile not found' });
 
+    const income = (profile.primarySalary || 0) + (profile.sideIncome || 0);
+    const expenses = (profile.rent || 0) + (profile.food || 0) + (profile.transport || 0) + (profile.entertainment || 0) + (profile.monthlyEMI || 0);
+    const netBalance = income - expenses;
+
+    // Generate realistic 6-month trend (simulated)
+    const months = ['MAY','JUN','JUL','AUG','SEP','OCT'];
+    const trend = months.map((month, idx) => {
+      const variation = (Math.random() * 0.2) - 0.1; // ±10%
+      return {
+        month,
+        income: Math.round(income * (1 + variation * (idx/5))),
+        expense: Math.round(expenses * (1 + variation * ((5-idx)/5))),
+      };
+    });
+
+    // Breakdown
+    const breakdown = [
+      { category: 'Salary', icon: 'work', amount: profile.primarySalary || 0, type: 'income', changePercent: 0 },
+      { category: 'Side Income', icon: 'work', amount: profile.sideIncome || 0, type: 'income', changePercent: 0 },
+      { category: 'Rent', icon: 'home', amount: profile.rent || 0, type: 'expense', changePercent: 0 },
+      { category: 'Food & Dining', icon: 'restaurant', amount: profile.food || 0, type: 'expense', changePercent: 12 },
+      { category: 'Transport', icon: 'directions_car', amount: profile.transport || 0, type: 'expense', changePercent: 0 },
+      { category: 'Entertainment', icon: 'theater_comedy', amount: profile.entertainment || 0, type: 'expense', changePercent: 0 },
+      { category: 'Subscriptions', icon: 'subscriptions', amount: 120, type: 'expense', changePercent: -5 }, // hardcoded
+    ].filter(item => item.amount > 0); // only show non-zero
+
+    res.json({
+      netBalance,
+      income,
+      expenses,
+      monthlyTrend: trend,
+      breakdown,
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
 // ─── Export for Vercel ──────────────────────────────
 module.exports = app;
