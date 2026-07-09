@@ -4,7 +4,7 @@ const cors = require('cors');
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
 require('dotenv').config();
-const fetch = require('node-fetch'); // Added for Gemini API calls
+
 
 const app = express();
 
@@ -362,7 +362,12 @@ app.post('/api/chat', authenticate, async (req, res) => {
   try {
     const { messages, userData } = req.body;
 
-    // Build a system prompt with real user context
+    // Validate messages array
+    if (!Array.isArray(messages) || messages.length === 0) {
+      return res.status(400).json({ error: 'messages must be a non-empty array' });
+    }
+
+    // Build system prompt
     const systemPrompt = `
 You are a helpful, personal financial advisor.
 Use the following real user data to give precise, actionable advice.
@@ -378,11 +383,19 @@ USER PROFILE:
 Answer the user's question concisely and helpfully.
 `.trim();
 
+    // Combine system prompt with user messages
+    const userMessages = messages.map(m => m.content || '').join('\n');
+    const fullPrompt = systemPrompt + '\n\n' + userMessages;
+
     const apiKey = process.env.GEMINI_API_KEY;
-    if (!apiKey) throw new Error('Missing GEMINI_API_KEY');
+    if (!apiKey) throw new Error('Missing GEMINI_API_KEY in environment');
+
+    // Use a current model name (gemini-2.5-flash is latest as of mid-2026)
+    // You can also make this an env variable: MODEL_NAME
+    const model = 'gemini-2.5-flash'; // change if needed
 
     const response = await fetch(
-      `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${apiKey}`,
+      `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`,
       {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -390,9 +403,7 @@ Answer the user's question concisely and helpfully.
           contents: [
             {
               role: 'user',
-              parts: [
-                { text: systemPrompt + '\n\n' + messages.map(m => m.content).join('\n') }
-              ]
+              parts: [{ text: fullPrompt }]
             }
           ]
         })
@@ -400,8 +411,17 @@ Answer the user's question concisely and helpfully.
     );
 
     const data = await response.json();
+
+    // Check for HTTP-level errors
+    if (!response.ok) {
+      console.error('Gemini API error:', data);
+      throw new Error(data.error?.message || `Gemini returned status ${response.status}`);
+    }
+
+    // Extract reply
     const reply = data.candidates?.[0]?.content?.parts?.[0]?.text
                   ?? 'I could not generate a response. Please try again.';
+
     res.json({ reply });
   } catch (err) {
     console.error('CHAT ERROR:', err);
