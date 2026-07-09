@@ -102,6 +102,7 @@ const profileSchema = new mongoose.Schema({
 
 const Profile = mongoose.model('Profile', profileSchema);
 
+
 // ─── Goal Model ─────────────────────────────────────
 const goalSchema = new mongoose.Schema({
   userId: { type: String, required: true },
@@ -117,6 +118,69 @@ const goalSchema = new mongoose.Schema({
 }, { timestamps: true });
 
 const Goal = mongoose.model('Goal', goalSchema);
+
+
+// ─── Tax Analysis Model (optional cache) ──────────
+const taxAnalysisSchema = new mongoose.Schema({
+  userId:        { type: String, required: true, unique: true },
+  annualTax:     Number,
+  effectiveRate: Number,
+  marginalRate:  Number,
+  federal:       Number,
+  state:         Number,
+  fica:          Number,
+  local:         Number,
+}, { timestamps: true });
+const TaxAnalysis = mongoose.model('TaxAnalysis', taxAnalysisSchema);
+
+// Helper: compute US federal income tax (simplified, single filer 2024)
+function computeFederalTax(income) {
+  // 2024 brackets
+  const brackets = [
+    { min: 0, max: 11600, rate: 0.10 },
+    { min: 11601, max: 47150, rate: 0.12 },
+    { min: 47151, max: 100525, rate: 0.22 },
+    { min: 100526, max: 191950, rate: 0.24 },
+    { min: 191951, max: 243725, rate: 0.32 },
+    { min: 243726, max: 609350, rate: 0.35 },
+    { min: 609351, max: Infinity, rate: 0.37 }
+  ];
+  let tax = 0;
+  for (const b of brackets) {
+    if (income > b.min) {
+      const taxable = Math.min(income - b.min, b.max - b.min + 1);
+      tax += taxable * b.rate;
+    }
+  }
+  return tax;
+}
+
+function computeNYStateTax(income) {
+  // Simplified NY (approx 6%)
+  return income * 0.06;
+}
+
+function computeFICA(income) {
+  const ssRate = 0.062, medicareRate = 0.0145;
+  const ssLimit = 168600;
+  const ssTax = Math.min(income, ssLimit) * ssRate;
+  const medicareTax = income * medicareRate;
+  return ssTax + medicareTax;
+}
+
+function computeLocalTax(income) {
+  return income * 0.015; // approx NYC
+}
+
+
+
+
+
+
+
+
+
+
 
 // ─── JWT Helpers ────────────────────────────────────
 const generateToken = (userId) => {
@@ -348,6 +412,61 @@ app.get('/api/action-plan', authenticate, async (req, res) => {
     res.status(500).json({ error: err.message });
   }
 });
+
+// GET /api/tax-analysis
+app.get('/api/tax-analysis', authenticate, async (req, res) => {
+  try {
+    const profile = await Profile.findOne({ userId: req.userId });
+    if (!profile) return res.status(404).json({ error: 'Profile not found' });
+
+    const income = (profile.primarySalary || 0) + (profile.sideIncome || 0);
+    const federal = computeFederalTax(income);
+    const state = computeNYStateTax(income); // could be personalised later
+    const fica = computeFICA(income);
+    const local = computeLocalTax(income);
+    const annualTax = federal + state + fica + local;
+    const effectiveRate = income > 0 ? (annualTax / income) * 100 : 0;
+    // marginal rate: from federal bracket
+    let marginalRate = 0.10;
+    const brackets = [11600,47150,100525,191950,243725,609350,Infinity];
+    for (const b of brackets) {
+      if (income <= b) { marginalRate = b === 11600 ? 0.10 : (b === 47150 ? 0.12 : b === 100525 ? 0.22 : b === 191950 ? 0.24 : b === 243725 ? 0.32 : b === 609350 ? 0.35 : 0.37); break; }
+    }
+
+    res.json({
+      annualTax,
+      effectiveRate: parseFloat(effectiveRate.toFixed(1)),
+      marginalRate: parseFloat((marginalRate * 100).toFixed(1)),
+      breakdown: {
+        federal,
+        state,
+        fica,
+        local,
+      },
+      tips: [
+        {
+          icon: 'account_balance',
+          title: 'Max out 401(k) Contributions',
+          description: 'You are currently $4,500 short of the $23,000 limit. Contributing the max could save you ~$1,080 in federal taxes.'
+        },
+        {
+          icon: 'health_and_safety',
+          title: 'HSA Catch-up',
+          description: 'Review your Health Savings Account. Contributions are tax-deductible and lower your taxable income.'
+        }
+      ]
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+
+
+
+
+
+
 
 // ─── Health check ───────────────────────────────────
 app.get('/', (req, res) => {
