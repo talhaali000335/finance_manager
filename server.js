@@ -4,6 +4,7 @@ const cors = require('cors');
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
 require('dotenv').config();
+const fetch = require('node-fetch'); // Added for Gemini API calls
 
 const app = express();
 
@@ -354,6 +355,58 @@ app.get('/', (req, res) => {
     message: 'FinPath API is running',
     dbState: ['disconnected', 'connected', 'connecting', 'disconnecting'][mongoose.connection.readyState] || 'unknown',
   });
+});
+
+// After your existing routes, before module.exports:
+app.post('/api/chat', authenticate, async (req, res) => {
+  try {
+    const { messages, userData } = req.body;
+
+    // Build a system prompt with real user context
+    const systemPrompt = `
+You are a helpful, personal financial advisor.
+Use the following real user data to give precise, actionable advice.
+Never make up numbers – refer to the data provided.
+
+USER PROFILE:
+- Net worth: $${userData.netWorth ?? 0}
+- Monthly income: $${userData.monthlyIncome ?? 0}
+- Monthly expenses: $${userData.monthlyExpenses ?? 0}
+- Goals: ${JSON.stringify(userData.goals ?? [])}
+- Achievements: ${JSON.stringify(userData.achievements ?? [])}
+
+Answer the user's question concisely and helpfully.
+`.trim();
+
+    const apiKey = process.env.GEMINI_API_KEY;
+    if (!apiKey) throw new Error('Missing GEMINI_API_KEY');
+
+    const response = await fetch(
+      `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${apiKey}`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          contents: [
+            {
+              role: 'user',
+              parts: [
+                { text: systemPrompt + '\n\n' + messages.map(m => m.content).join('\n') }
+              ]
+            }
+          ]
+        })
+      }
+    );
+
+    const data = await response.json();
+    const reply = data.candidates?.[0]?.content?.parts?.[0]?.text
+                  ?? 'I could not generate a response. Please try again.';
+    res.json({ reply });
+  } catch (err) {
+    console.error('CHAT ERROR:', err);
+    res.status(500).json({ error: err.message });
+  }
 });
 
 // ─── Export for Vercel ──────────────────────────────
