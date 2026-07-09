@@ -77,6 +77,18 @@ userSchema.methods.comparePassword = async function (candidatePassword) {
 
 const User = mongoose.model('User', userSchema);
 
+// ─── Linked Accounts Model ─────────────────────────
+const linkedAccountSchema = new mongoose.Schema({
+  userId:          { type: String, required: true },
+  institutionName: { type: String, required: true },
+  accountType:     { type: String, default: 'checking' }, // checking, savings, ira, brokerage
+  lastFour:        { type: String, default: '0000' },
+  balance:         { type: Number, default: 0 },
+  logoUrl:         { type: String, default: '' },
+}, { timestamps: true });
+
+const LinkedAccount = mongoose.model('LinkedAccount', linkedAccountSchema);
+
 // ─── Profile Model ──────────────────────────────────
 const profileSchema = new mongoose.Schema({
   userId: { type: String, required: true, unique: true },
@@ -590,5 +602,48 @@ app.get('/api/cash-flow', authenticate, async (req, res) => {
     res.status(500).json({ error: err.message });
   }
 });
+
+// ─── linked Account user ──────────────────────────────
+
+// GET all linked accounts for the user
+app.get('/api/linked-accounts', authenticate, async (req, res) => {
+  try {
+    const accounts = await LinkedAccount.find({ userId: req.userId }).sort({ createdAt: -1 });
+    res.json(accounts);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// POST a new linked account (simulated for now – replace with Plaid later)
+app.post('/api/linked-accounts', authenticate, async (req, res) => {
+  try {
+    const { institutionName, accountType, lastFour, balance, logoUrl } = req.body;
+    if (!institutionName) return res.status(400).json({ error: 'Institution name is required.' });
+    const account = await LinkedAccount.create({
+      userId: req.userId,
+      institutionName,
+      accountType: accountType || 'checking',
+      lastFour: lastFour || '0000',
+      balance: balance || 0,
+      logoUrl: logoUrl || '',
+    });
+    res.status(201).json(account);
+  } catch (err) {
+    res.status(400).json({ error: err.message });
+  }
+});
+
+// DELETE an account
+app.delete('/api/linked-accounts/:id', authenticate, async (req, res) => {
+  try {
+    const account = await LinkedAccount.findOneAndDelete({ _id: req.params.id, userId: req.userId });
+    if (!account) return res.status(404).json({ error: 'Account not found' });
+    res.json({ message: 'Account removed' });
+  } catch (err) {
+    res.status(400).json({ error: err.message });
+  }
+});
+
 // ─── Export for Vercel ──────────────────────────────
 module.exports = app;
