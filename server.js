@@ -304,6 +304,17 @@ app.get('/api/goals/:id', authenticate, async (req, res) => {
   }
 });
 
+// DELETE – Remove a goal
+app.delete('/api/goals/:id', authenticate, async (req, res) => {
+  try {
+    const goal = await Goal.findOneAndDelete({ _id: req.params.id, userId: req.userId });
+    if (!goal) return res.status(404).json({ error: 'Goal not found' });
+    res.json({ message: 'Goal deleted successfully' });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // ─── PROFILE ROUTES ─────────────────────────────────
 const authorizeProfileAccess = (req, res, next) => {
   if (req.params.userId !== req.userId) return res.status(403).json({ error: 'You can only access your own profile.' });
