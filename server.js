@@ -598,6 +598,7 @@ app.get('/', (req, res) => {
 });
 
 // ─── Gemini Chat Endpoint ───────────────────────────
+// ─── Gemini Chat Endpoint ───────────────────────────
 app.post('/api/chat', authenticate, async (req, res) => {
   try {
     const { messages, userData } = req.body;
@@ -626,22 +627,44 @@ Answer the user's question concisely and helpfully.
     const apiKey = process.env.GEMINI_API_KEY;
     if (!apiKey) throw new Error('Missing GEMINI_API_KEY');
 
-    const model = 'gemini-2.5-flash';
-    const response = await fetch(
-      `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`,
-      {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          contents: [{ role: 'user', parts: [{ text: fullPrompt }] }]
-        })
-      }
-    );
+    // Model selection – use environment variable or fallback
+    const primaryModel = process.env.GEMINI_MODEL || 'gemini-1.5-flash';
+    const fallbackModel = 'gemini-1.5-pro';
 
-    const data = await response.json();
-    if (!response.ok) {
-      console.error('Gemini API error:', data);
-      throw new Error(data.error?.message || `Gemini returned status ${response.status}`);
+    // Helper function to call Gemini API
+    const callGemini = async (model) => {
+      const response = await fetch(
+        `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`,
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            contents: [{ role: 'user', parts: [{ text: fullPrompt }] }]
+          })
+        }
+      );
+      const data = await response.json();
+      if (!response.ok) {
+        const err = new Error(data.error?.message || `Gemini returned status ${response.status}`);
+        err.status = response.status;
+        err.data = data;
+        throw err;
+      }
+      return data;
+    };
+
+    let data;
+    try {
+      // Try primary model
+      data = await callGemini(primaryModel);
+    } catch (err) {
+      // If primary model fails with 404 (model not found), try fallback
+      if (err.status === 404 && primaryModel !== fallbackModel) {
+        console.warn(`⚠️ Primary model "${primaryModel}" not found, falling back to "${fallbackModel}"`);
+        data = await callGemini(fallbackModel);
+      } else {
+        throw err;
+      }
     }
 
     const reply = data.candidates?.[0]?.content?.parts?.[0]?.text
@@ -649,9 +672,13 @@ Answer the user's question concisely and helpfully.
     res.json({ reply });
   } catch (err) {
     console.error('CHAT ERROR:', err);
-    res.status(500).json({ error: err.message });
+    // Send a user-friendly error
+    const status = err.status || 500;
+    const message = status === 404 
+      ? 'The AI model is not available. Please contact support.'
+      : err.message || 'Server error. Please try again later.';
+    res.status(status).json({ error: message });
   }
 });
-
 // ─── Export for Vercel ──────────────────────────────
 module.exports = app;
