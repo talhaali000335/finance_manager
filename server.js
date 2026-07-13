@@ -117,7 +117,11 @@ const Profile = mongoose.model('Profile', profileSchema);
 // ─── Goal Model ─────────────────────────────────────
 const goalSchema = new mongoose.Schema({
   userId: { type: String, required: true },
-  goalType: { type: String, enum: ['home', 'car', 'education', 'custom'], required: true },
+  goalType: {
+  type: String,
+  enum: ['home', 'car', 'education', 'custom', 'vacation', 'business', 'savings', 'emergency_fund'],
+  required: true,
+},
   name: { type: String, default: '' },
   targetAmount: { type: Number, required: true },
   targetDate: { type: Date, required: true },
