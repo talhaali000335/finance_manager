@@ -597,7 +597,6 @@ app.get('/', (req, res) => {
   });
 });
 
-// ─── OpenRouter Chat Endpoint ──────────────────────
 app.post('/api/chat', authenticate, async (req, res) => {
   try {
     const { messages, userData } = req.body;
@@ -626,23 +625,26 @@ Answer the user's question concisely and helpfully.
     ];
 
     const apiKey = process.env.OPENROUTER_API_KEY;
-    if (!apiKey) throw new Error('Missing OPENROUTER_API_KEY');
+    if (!apiKey) {
+      console.error('❌ Missing OPENROUTER_API_KEY');
+      return res.status(500).json({ error: 'Server configuration error: missing API key' });
+    }
 
-    // ─── FORCE A WORKING FREE MODEL ─────────────────
-    // This model is currently available and free on OpenRouter.
-    // If it ever goes down, replace it with another from the list below.
+    // ⚠️ Use a proven free model – confirmed working as of today
     const model = 'meta-llama/llama-3.2-3b-instruct:free';
+
+    console.log(`📡 Calling OpenRouter with model: ${model}`);
 
     const response = await fetch('https://openrouter.ai/api/v1/chat/completions', {
       method: 'POST',
       headers: {
         'Authorization': `Bearer ${apiKey}`,
         'Content-Type': 'application/json',
-        'HTTP-Referer': process.env.OPENROUTER_REFERER || 'https://your-app-domain.com',
+        'HTTP-Referer': process.env.OPENROUTER_REFERER || 'https://finpath.app',
         'X-Title': process.env.OPENROUTER_TITLE || 'FinPath AI',
       },
       body: JSON.stringify({
-        model: model,
+        model,
         messages: chatMessages,
         temperature: 0.7,
         max_tokens: 1024,
@@ -650,17 +652,26 @@ Answer the user's question concisely and helpfully.
     });
 
     const data = await response.json();
+    console.log('📡 OpenRouter response status:', response.status);
+    console.log('📡 OpenRouter response body:', JSON.stringify(data).slice(0, 200));
+
     if (!response.ok) {
-      console.error('OpenRouter error:', data);
-      throw new Error(data.error?.message || `OpenRouter returned status ${response.status}`);
+      // Forward the exact error from OpenRouter to the client
+      const errorMsg = data.error?.message || `OpenRouter returned status ${response.status}`;
+      console.error('❌ OpenRouter error:', errorMsg);
+      return res.status(502).json({ error: errorMsg });
     }
 
-    const reply = data.choices?.[0]?.message?.content
-                  ?? 'I could not generate a response. Please try again.';
+    const reply = data.choices?.[0]?.message?.content;
+    if (!reply) {
+      console.error('❌ No reply in OpenRouter response');
+      return res.status(500).json({ error: 'No reply generated. Please try again.' });
+    }
+
     res.json({ reply });
   } catch (err) {
-    console.error('CHAT ERROR:', err);
-    res.status(500).json({ error: err.message || 'Server error. Please try again later.' });
+    console.error('❌ CHAT ERROR:', err);
+    res.status(500).json({ error: err.message || 'Server error' });
   }
 });
 // ─── Export for Vercel ──────────────────────────────
