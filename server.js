@@ -92,6 +92,8 @@ const LinkedAccount = mongoose.model('LinkedAccount', linkedAccountSchema);
 const profileSchema = new mongoose.Schema({
   userId: { type: String, required: true, unique: true },
   profilePicture: { type: String, default: '' },   // <-- new
+  customIncomes:  { type: [Object], default: [] },
+  customExpenses: { type: [Object], default: [] },
   age: Number,
   employment: String,
   country: String,
