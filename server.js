@@ -622,71 +622,41 @@ Answer the user's question concisely and helpfully.
 
     const chatMessages = [
       { role: 'system', content: systemPrompt },
-      ...messages.map(m => ({
-        role: m.role || 'user',
-        content: m.content || ''
-      }))
+      ...messages.map(m => ({ role: m.role || 'user', content: m.content || '' }))
     ];
 
     const apiKey = process.env.OPENROUTER_API_KEY;
     if (!apiKey) throw new Error('Missing OPENROUTER_API_KEY');
 
-    // List of models to try (first one that works will be used)
-    const modelList = [
-      process.env.OPENROUTER_MODEL,
-      'google/gemini-2.0-flash-exp:free',
-      'google/gemini-flash-1.5-8b:free',
-      'meta-llama/llama-3.3-70b-instruct:free',
-      'openai/gpt-4o-mini',
-    ].filter(Boolean); // remove undefined/null
+    // Use the environment variable, or fallback to a stable free model
+    const primaryModel = process.env.OPENROUTER_MODEL || 'meta-llama/llama-3.2-3b-instruct:free';
+    // If you prefer a Google model, try 'google/gemini-2.5-flash-lite-preview-05-20:free'
 
-    let lastError = null;
+    const response = await fetch('https://openrouter.ai/api/v1/chat/completions', {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${apiKey}`,
+        'Content-Type': 'application/json',
+        'HTTP-Referer': process.env.OPENROUTER_REFERER || 'https://your-app-domain.com',
+        'X-Title': process.env.OPENROUTER_TITLE || 'FinPath AI',
+      },
+      body: JSON.stringify({
+        model: primaryModel,
+        messages: chatMessages,
+        temperature: 0.7,
+        max_tokens: 1024,
+      }),
+    });
 
-    for (const model of modelList) {
-      try {
-        const response = await fetch('https://openrouter.ai/api/v1/chat/completions', {
-          method: 'POST',
-          headers: {
-            'Authorization': `Bearer ${apiKey}`,
-            'Content-Type': 'application/json',
-            'HTTP-Referer': process.env.OPENROUTER_REFERER || 'https://your-app-domain.com',
-            'X-Title': process.env.OPENROUTER_TITLE || 'FinPath AI',
-          },
-          body: JSON.stringify({
-            model: model,
-            messages: chatMessages,
-            temperature: 0.7,
-            max_tokens: 1024,
-          }),
-        });
-
-        const data = await response.json();
-        if (!response.ok) {
-          const errMsg = data.error?.message || `OpenRouter returned status ${response.status}`;
-          if (data.error?.code === 'invalid_model') {
-            // Model not found, try next
-            console.warn(`Model "${model}" not available, trying next...`);
-            continue;
-          }
-          throw new Error(errMsg);
-        }
-
-        const reply = data.choices?.[0]?.message?.content
-                      ?? 'I could not generate a response. Please try again.';
-        return res.json({ reply });
-
-      } catch (err) {
-        lastError = err;
-        // If it's not a model-not-found, break immediately
-        if (err.message && !err.message.includes('invalid_model')) {
-          throw err;
-        }
-      }
+    const data = await response.json();
+    if (!response.ok) {
+      console.error('OpenRouter error:', data);
+      throw new Error(data.error?.message || `OpenRouter returned status ${response.status}`);
     }
 
-    // If all models failed
-    throw lastError || new Error('All available models failed. Please check OpenRouter API key and model list.');
-
+    const reply = data.choices?.[0]?.message?.content
+                  ?? 'I could not generate a response. Please try again.';
+    res.json({ reply });
   } catch (err) {
     console.error('CHAT ERROR:', err);
     res.status(500).json({ error: err.message || 'Server error. Please try again later.' });
