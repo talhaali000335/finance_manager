@@ -134,7 +134,7 @@ const goalSchema = new mongoose.Schema({
 
 const Goal = mongoose.model('Goal', goalSchema);
 
-// ─── Tax Analysis Model (optional cache) ──────────
+
 // ─── TAX ANALYSIS – AI‑powered (Gemini) ───────────
 app.get('/api/tax-analysis', authenticate, async (req, res) => {
   try {
@@ -142,7 +142,7 @@ app.get('/api/tax-analysis', authenticate, async (req, res) => {
     if (!profile) return res.status(404).json({ error: 'Profile not found' });
 
     const income = (profile.primarySalary || 0) + (profile.sideIncome || 0);
-    const state = profile.state || 'NY';   // assume NY if not set, you can adjust
+    const state = profile.state || 'NY';            // adjust as needed
     const filingStatus = profile.filingStatus || 'Single';
     const currentDate = new Date().toISOString().split('T')[0];
 
@@ -175,11 +175,9 @@ Return ONLY the JSON, no additional text.
 
     const apiKey = process.env.GEMINI_API_KEY;
     if (!apiKey) {
-      console.error('❌ Missing GEMINI_API_KEY');
-      return res.status(500).json({ error: 'Server configuration error: missing API key' });
+      return res.status(500).json({ error: 'Server configuration error: missing GEMINI_API_KEY' });
     }
 
-    // Models to try (fallback chain)
     const models = [
       'gemini-2.5-flash-preview-05-20',
       'gemini-2.0-flash',
@@ -189,7 +187,7 @@ Return ONLY the JSON, no additional text.
     let lastError = null;
     for (const model of models) {
       try {
-        console.log(`🔍 Calling Gemini for tax analysis using model: ${model}`);
+        console.log(`🔍 Trying Gemini for tax analysis with model: ${model}`);
         const response = await fetch(
           `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`,
           {
@@ -203,39 +201,32 @@ Return ONLY the JSON, no additional text.
 
         const data = await response.json();
         if (!response.ok) {
-          const errMsg = data.error?.message || `status ${response.status}`;
-          console.warn(`⚠️ Model ${model} failed: ${errMsg}`);
-          lastError = new Error(errMsg);
-          continue;   // try next model
+          throw new Error(data.error?.message || `Gemini returned status ${response.status}`);
         }
 
         const rawText = data.candidates?.[0]?.content?.parts?.[0]?.text;
-        if (!rawText) {
-          lastError = new Error('No content returned from Gemini');
-          continue;
-        }
+        if (!rawText) throw new Error('No content returned from Gemini');
 
-        // Extract the JSON from the response (sometimes wrapped in ```json blocks)
+        // Extract JSON (sometimes wrapped in ```json blocks)
         const jsonStr = rawText.replace(/```json|```/g, '').trim();
         const analysis = JSON.parse(jsonStr);
 
-        // Basic validation
         if (analysis.annualTax == null || analysis.effectiveRate == null) {
           throw new Error('Incomplete data from Gemini');
         }
 
-        // Optionally save to DB (if you want to cache)
+        // Optionally cache the result
         await TaxAnalysis.findOneAndUpdate(
           { userId: req.userId },
           { ...analysis, userId: req.userId },
           { upsert: true, new: true }
         );
 
-        console.log(`✅ Gemini tax analysis successful with model: ${model}`);
+        console.log(`✅ Tax analysis generated with model: ${model}`);
         return res.json(analysis);
 
       } catch (err) {
-        console.warn(`⚠️ Error with model ${model}: ${err.message}`);
+        console.warn(`⚠️ Model ${model} failed: ${err.message}`);
         lastError = err;
       }
     }
@@ -246,7 +237,8 @@ Return ONLY the JSON, no additional text.
 
   } catch (err) {
     console.error('TAX ANALYSIS ERROR:', err);
-    res.status(500).json({ error: err.message || 'Server error' });
+    // ✅ Always return valid JSON
+    res.status(500).json({ error: err.message || 'Internal server error' });
   }
 });
 // ─── JWT Helpers ────────────────────────────────────
@@ -747,5 +739,10 @@ Answer the user's question concisely and helpfully.
     res.status(500).json({ error: err.message || 'Server error. Please try again later.' });
   }
 });
+
+
+
+
+
 // ─── Export for Vercel ──────────────────────────────
 module.exports = app;
