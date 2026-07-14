@@ -88,7 +88,26 @@ const linkedAccountSchema = new mongoose.Schema({
 
 const LinkedAccount = mongoose.model('LinkedAccount', linkedAccountSchema);
 
+
+
+
 // ─── Profile Model (added completedTasks field) ─────
+
+// ─── Monthly Snapshot Model ──────────────────────
+const monthlySnapshotSchema = new mongoose.Schema({
+  userId:    { type: String, required: true },
+  monthKey:  { type: String, required: true },   // e.g. "2026-07"
+  income:    { type: Number, default: 0 },
+  expenses:  { type: Number, default: 0 },
+}, { timestamps: true });
+
+// Ensure one snapshot per user per month
+monthlySnapshotSchema.index({ userId: 1, monthKey: 1 }, { unique: true });
+
+const MonthlySnapshot = mongoose.model('MonthlySnapshot', monthlySnapshotSchema);
+
+// ─── Profile Model (added completedTasks field) ─────
+
 const profileSchema = new mongoose.Schema({
   userId: { type: String, required: true, unique: true },
   profilePicture: { type: String, default: '' },   // <-- new
@@ -526,24 +545,31 @@ app.get('/api/cash-flow', authenticate, async (req, res) => {
     const expenses = (profile.rent || 0) + (profile.food || 0) + (profile.transport || 0) + (profile.entertainment || 0) + (profile.monthlyEMI || 0);
     const netBalance = income - expenses;
 
-    // Stable 6-month trend: income increases by 2% each month, expenses slightly wave
-const allMonths = ['JAN','FEB','MAR','APR','MAY','JUN','JUL','AUG','SEP','OCT','NOV','DEC'];
-const now = new Date();
-const currentMonthIndex = now.getMonth();  // 0‑based (Jan = 0)
+    // ─── Current month key (e.g. "2026-07") ───────
+    const now = new Date();
+    const currentMonthKey = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`;
 
-const months = [];
-for (let i = 5; i >= 0; i--) {
-  const monthIndex = (currentMonthIndex - i + 12) % 12;
-  months.push(allMonths[monthIndex]);
-}
+    // Auto‑save a snapshot for the current month (if not already saved)
+    await MonthlySnapshot.findOneAndUpdate(
+      { userId: req.userId, monthKey: currentMonthKey },
+      { $setOnInsert: { income, expenses } },
+      { upsert: true, new: true }
+    );
 
-// Use the dynamic months array instead of the hardcoded one
-const trend = months.map((month, idx) => {
-  const factor = 1 + idx * 0.02;
-  const incomeVal = Math.round(income * factor);
-  const expenseVal = Math.round(expenses * (1 + (idx - 2) * 0.01));
-  return { month, income: incomeVal, expense: expenseVal };
-});
+    // ─── Fetch last 6 snapshots ──────────────────
+    const snapshots = await MonthlySnapshot
+      .find({ userId: req.userId })
+      .sort({ monthKey: -1 })         // newest first
+      .limit(6);
+
+    // Build trend from snapshots (oldest first)
+    const trend = snapshots
+      .reverse()
+      .map(s => ({
+        month: s.monthKey,            // e.g. "2026-07"
+        income: s.income,
+        expense: s.expenses,
+      }));
 
     const breakdown = [
       { category: 'Salary', icon: 'work', amount: profile.primarySalary || 0, type: 'income', changePercent: 0 },
@@ -559,7 +585,10 @@ const trend = months.map((month, idx) => {
       netBalance,
       income,
       expenses,
-      monthlyTrend: trend,
+      monthlyTrend: trend.length ? trend : [
+        // fallback: at least the current month
+        { month: currentMonthKey, income, expense: expenses }
+      ],
       breakdown,
     });
   } catch (err) {
