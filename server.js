@@ -490,12 +490,7 @@ Return ONLY the JSON, no additional text.
           throw new Error('Incomplete data from Gemini');
         }
 
-        // Optionally cache the result
-        await TaxAnalysis.findOneAndUpdate(
-          { userId: req.userId },
-          { ...analysis, userId: req.userId },
-          { upsert: true, new: true }
-        );
+       
 
         console.log(`✅ Tax analysis generated with model: ${model}`);
         return res.json(analysis);
