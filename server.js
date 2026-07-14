@@ -451,11 +451,13 @@ Return ONLY the JSON, no additional text.
       return res.status(500).json({ error: 'Server configuration error: missing GEMINI_API_KEY' });
     }
 
-    const models = [
-     'gemini-2.5-flash',                // stable, free tier
-  'gemini-2.5-flash-lite',           // fallback
-  'gemini-3-flash-preview',          // preview (if still available)
-    ];
+     const models = [
+       'gemini-2.5-flash',                // stable, free tier
+       'gemini-2.5-flash-lite',           // fallback
+       'gemini-3-flash-preview',          // preview (if still available)
+                 ];
+
+    
 
     let lastError = null;
     for (const model of models) {
