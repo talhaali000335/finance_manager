@@ -597,6 +597,8 @@ app.get('/', (req, res) => {
   });
 });
 
+// ─── Open Router chat ───────────────────────────────────
+
 app.post('/api/chat', authenticate, async (req, res) => {
   try {
     const { messages, userData } = req.body;
@@ -626,51 +628,69 @@ Answer the user's question concisely and helpfully.
 
     const apiKey = process.env.OPENROUTER_API_KEY;
     if (!apiKey) {
-      console.error('❌ Missing OPENROUTER_API_KEY');
       return res.status(500).json({ error: 'Server configuration error: missing API key' });
     }
 
-    // ⚠️ Use a proven free model – confirmed working as of today
-    const model = 'meta-llama/llama-3.2-3b-instruct:free';
+    // List of free models to try (order matters – first success wins)
+    const models = [
+      'meta-llama/llama-3.2-3b-instruct:free',
+      'google/gemini-2.5-flash-lite-preview-05-20:free',
+      'qwen/qwen2.5-7b-instruct:free',
+      'microsoft/phi-3.5-mini-128k-instruct:free',
+    ];
 
-    console.log(`📡 Calling OpenRouter with model: ${model}`);
+    const callModel = async (model, attempt = 1) => {
+      const response = await fetch('https://openrouter.ai/api/v1/chat/completions', {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${apiKey}`,
+          'Content-Type': 'application/json',
+          'HTTP-Referer': process.env.OPENROUTER_REFERER || 'https://finpath.app',
+          'X-Title': process.env.OPENROUTER_TITLE || 'FinPath AI',
+        },
+        body: JSON.stringify({
+          model,
+          messages: chatMessages,
+          temperature: 0.7,
+          max_tokens: 1024,
+        }),
+      });
 
-    const response = await fetch('https://openrouter.ai/api/v1/chat/completions', {
-      method: 'POST',
-      headers: {
-        'Authorization': `Bearer ${apiKey}`,
-        'Content-Type': 'application/json',
-        'HTTP-Referer': process.env.OPENROUTER_REFERER || 'https://finpath.app',
-        'X-Title': process.env.OPENROUTER_TITLE || 'FinPath AI',
-      },
-      body: JSON.stringify({
-        model,
-        messages: chatMessages,
-        temperature: 0.7,
-        max_tokens: 1024,
-      }),
-    });
+      const data = await response.json();
+      if (!response.ok) {
+        const errMsg = data.error?.message || `OpenRouter returned status ${response.status}`;
+        if (response.status === 429 && attempt < 3) {
+          // Rate-limited – wait and retry
+          const delay = attempt * 1000; // 1s, 2s, 3s
+          console.log(`Rate limited on ${model}, retrying in ${delay}ms (attempt ${attempt})`);
+          await new Promise(resolve => setTimeout(resolve, delay));
+          return callModel(model, attempt + 1);
+        }
+        throw new Error(errMsg);
+      }
+      return data;
+    };
 
-    const data = await response.json();
-    console.log('📡 OpenRouter response status:', response.status);
-    console.log('📡 OpenRouter response body:', JSON.stringify(data).slice(0, 200));
+    let success = false;
+    let lastError = null;
 
-    if (!response.ok) {
-      // Forward the exact error from OpenRouter to the client
-      const errorMsg = data.error?.message || `OpenRouter returned status ${response.status}`;
-      console.error('❌ OpenRouter error:', errorMsg);
-      return res.status(502).json({ error: errorMsg });
+    for (const model of models) {
+      try {
+        const data = await callModel(model);
+        const reply = data.choices?.[0]?.message?.content
+                      ?? 'I could not generate a response. Please try again.';
+        return res.json({ reply });
+      } catch (err) {
+        lastError = err;
+        console.warn(`Model ${model} failed: ${err.message}`);
+      }
     }
 
-    const reply = data.choices?.[0]?.message?.content;
-    if (!reply) {
-      console.error('❌ No reply in OpenRouter response');
-      return res.status(500).json({ error: 'No reply generated. Please try again.' });
-    }
+    // All models failed
+    throw lastError || new Error('All free models are currently unavailable.');
 
-    res.json({ reply });
   } catch (err) {
-    console.error('❌ CHAT ERROR:', err);
+    console.error('CHAT ERROR:', err);
     res.status(500).json({ error: err.message || 'Server error' });
   }
 });
