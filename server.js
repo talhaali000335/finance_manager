@@ -135,112 +135,7 @@ const goalSchema = new mongoose.Schema({
 const Goal = mongoose.model('Goal', goalSchema);
 
 
-// ─── TAX ANALYSIS – AI‑powered (Gemini) ───────────
-app.get('/api/tax-analysis', authenticate, async (req, res) => {
-  try {
-    const profile = await Profile.findOne({ userId: req.userId });
-    if (!profile) return res.status(404).json({ error: 'Profile not found' });
 
-    const income = (profile.primarySalary || 0) + (profile.sideIncome || 0);
-    const state = profile.state || 'NY';            // adjust as needed
-    const filingStatus = profile.filingStatus || 'Single';
-    const currentDate = new Date().toISOString().split('T')[0];
-
-    const prompt = `
-You are a tax advisor. Based on the following user data, provide a tax analysis in JSON format.
-User data:
-- Annual income: $${income}
-- State: ${state}
-- Filing status: ${filingStatus}
-- Current date: ${currentDate}
-
-Output must be a valid JSON object with these exact keys:
-{
-  "annualTax": number (estimated total federal + state + FICA + local),
-  "effectiveRate": number (as percentage),
-  "marginalRate": number (as percentage),
-  "breakdown": {
-    "federal": number,
-    "state": number,
-    "fica": number,
-    "local": number
-  },
-  "tips": [
-    {"icon": "account_balance", "title": "string", "description": "string"},
-    {"icon": "health_and_safety", "title": "string", "description": "string"}
-  ]
-}
-Return ONLY the JSON, no additional text.
-`.trim();
-
-    const apiKey = process.env.GEMINI_API_KEY;
-    if (!apiKey) {
-      return res.status(500).json({ error: 'Server configuration error: missing GEMINI_API_KEY' });
-    }
-
-    const models = [
-      'gemini-2.5-flash-preview-05-20',
-      'gemini-2.0-flash',
-      'gemini-1.5-flash',
-    ];
-
-    let lastError = null;
-    for (const model of models) {
-      try {
-        console.log(`🔍 Trying Gemini for tax analysis with model: ${model}`);
-        const response = await fetch(
-          `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`,
-          {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              contents: [{ role: 'user', parts: [{ text: prompt }] }]
-            })
-          }
-        );
-
-        const data = await response.json();
-        if (!response.ok) {
-          throw new Error(data.error?.message || `Gemini returned status ${response.status}`);
-        }
-
-        const rawText = data.candidates?.[0]?.content?.parts?.[0]?.text;
-        if (!rawText) throw new Error('No content returned from Gemini');
-
-        // Extract JSON (sometimes wrapped in ```json blocks)
-        const jsonStr = rawText.replace(/```json|```/g, '').trim();
-        const analysis = JSON.parse(jsonStr);
-
-        if (analysis.annualTax == null || analysis.effectiveRate == null) {
-          throw new Error('Incomplete data from Gemini');
-        }
-
-        // Optionally cache the result
-        await TaxAnalysis.findOneAndUpdate(
-          { userId: req.userId },
-          { ...analysis, userId: req.userId },
-          { upsert: true, new: true }
-        );
-
-        console.log(`✅ Tax analysis generated with model: ${model}`);
-        return res.json(analysis);
-
-      } catch (err) {
-        console.warn(`⚠️ Model ${model} failed: ${err.message}`);
-        lastError = err;
-      }
-    }
-
-    // All models failed
-    console.error('❌ All Gemini models failed for tax analysis');
-    throw lastError || new Error('Unable to generate tax analysis. Please try again later.');
-
-  } catch (err) {
-    console.error('TAX ANALYSIS ERROR:', err);
-    // ✅ Always return valid JSON
-    res.status(500).json({ error: err.message || 'Internal server error' });
-  }
-});
 // ─── JWT Helpers ────────────────────────────────────
 const generateToken = (userId) => {
   return jwt.sign({ userId }, JWT_SECRET, { expiresIn: JWT_EXPIRES_IN });
@@ -510,6 +405,113 @@ app.post('/api/action-plan/task-done', authenticate, async (req, res) => {
     res.json({ success: true });
   } catch (err) {
     res.status(500).json({ error: err.message });
+  }
+});
+
+// ─── TAX ANALYSIS – AI‑powered (Gemini) ───────────
+app.get('/api/tax-analysis', authenticate, async (req, res) => {
+  try {
+    const profile = await Profile.findOne({ userId: req.userId });
+    if (!profile) return res.status(404).json({ error: 'Profile not found' });
+
+    const income = (profile.primarySalary || 0) + (profile.sideIncome || 0);
+    const state = profile.state || 'NY';            // adjust as needed
+    const filingStatus = profile.filingStatus || 'Single';
+    const currentDate = new Date().toISOString().split('T')[0];
+
+    const prompt = `
+You are a tax advisor. Based on the following user data, provide a tax analysis in JSON format.
+User data:
+- Annual income: $${income}
+- State: ${state}
+- Filing status: ${filingStatus}
+- Current date: ${currentDate}
+
+Output must be a valid JSON object with these exact keys:
+{
+  "annualTax": number (estimated total federal + state + FICA + local),
+  "effectiveRate": number (as percentage),
+  "marginalRate": number (as percentage),
+  "breakdown": {
+    "federal": number,
+    "state": number,
+    "fica": number,
+    "local": number
+  },
+  "tips": [
+    {"icon": "account_balance", "title": "string", "description": "string"},
+    {"icon": "health_and_safety", "title": "string", "description": "string"}
+  ]
+}
+Return ONLY the JSON, no additional text.
+`.trim();
+
+    const apiKey = process.env.GEMINI_API_KEY;
+    if (!apiKey) {
+      return res.status(500).json({ error: 'Server configuration error: missing GEMINI_API_KEY' });
+    }
+
+    const models = [
+      'gemini-2.5-flash-preview-05-20',
+      'gemini-2.0-flash',
+      'gemini-1.5-flash',
+    ];
+
+    let lastError = null;
+    for (const model of models) {
+      try {
+        console.log(`🔍 Trying Gemini for tax analysis with model: ${model}`);
+        const response = await fetch(
+          `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`,
+          {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              contents: [{ role: 'user', parts: [{ text: prompt }] }]
+            })
+          }
+        );
+
+        const data = await response.json();
+        if (!response.ok) {
+          throw new Error(data.error?.message || `Gemini returned status ${response.status}`);
+        }
+
+        const rawText = data.candidates?.[0]?.content?.parts?.[0]?.text;
+        if (!rawText) throw new Error('No content returned from Gemini');
+
+        // Extract JSON (sometimes wrapped in ```json blocks)
+        const jsonStr = rawText.replace(/```json|```/g, '').trim();
+        const analysis = JSON.parse(jsonStr);
+
+        if (analysis.annualTax == null || analysis.effectiveRate == null) {
+          throw new Error('Incomplete data from Gemini');
+        }
+
+        // Optionally cache the result
+        await TaxAnalysis.findOneAndUpdate(
+          { userId: req.userId },
+          { ...analysis, userId: req.userId },
+          { upsert: true, new: true }
+        );
+
+        console.log(`✅ Tax analysis generated with model: ${model}`);
+        return res.json(analysis);
+
+      } catch (err) {
+        console.warn(`⚠️ Model ${model} failed: ${err.message}`);
+        lastError = err;
+      }
+    }
+
+    // All models failed
+    console.error('❌ All Gemini models failed for tax analysis');
+    throw lastError || new Error('Unable to generate tax analysis. Please try again later.');
+
+  } catch (err) {
+    console.error('TAX ANALYSIS ERROR:', err);
+    // ✅ Always return valid JSON
+    res.status(500).json({ error: err.message || 'Internal server error' });
   }
 });
 
