@@ -621,77 +621,65 @@ USER PROFILE:
 Answer the user's question concisely and helpfully.
 `.trim();
 
-    const chatMessages = [
-      { role: 'system', content: systemPrompt },
-      ...messages.map(m => ({ role: m.role || 'user', content: m.content || '' }))
-    ];
+    const userMessages = messages.map(m => m.content || '').join('\n');
+    const fullPrompt = systemPrompt + '\n\n' + userMessages;
 
-    const apiKey = process.env.OPENROUTER_API_KEY;
+    const apiKey = process.env.GEMINI_API_KEY;
     if (!apiKey) {
+      console.error('❌ Missing GEMINI_API_KEY');
       return res.status(500).json({ error: 'Server configuration error: missing API key' });
     }
 
-    // List of free models to try (order matters – first success wins)
+    // ─── Gemini models in order of preference (fallback chain) ───
     const models = [
-      'meta-llama/llama-3.2-3b-instruct:free',
-      'google/gemini-2.5-flash-lite-preview-05-20:free',
-      'qwen/qwen2.5-7b-instruct:free',
-      'microsoft/phi-3.5-mini-128k-instruct:free',
+      'gemini-2.5-flash-preview-05-20',   // newest flash (experimental)
+      'gemini-2.0-flash',                 // stable flash
+      'gemini-1.5-flash',                 // previous generation fallback
     ];
 
-    const callModel = async (model, attempt = 1) => {
-      const response = await fetch('https://openrouter.ai/api/v1/chat/completions', {
-        method: 'POST',
-        headers: {
-          'Authorization': `Bearer ${apiKey}`,
-          'Content-Type': 'application/json',
-          'HTTP-Referer': process.env.OPENROUTER_REFERER || 'https://finpath.app',
-          'X-Title': process.env.OPENROUTER_TITLE || 'FinPath AI',
-        },
-        body: JSON.stringify({
-          model,
-          messages: chatMessages,
-          temperature: 0.7,
-          max_tokens: 1024,
-        }),
-      });
-
-      const data = await response.json();
-      if (!response.ok) {
-        const errMsg = data.error?.message || `OpenRouter returned status ${response.status}`;
-        if (response.status === 429 && attempt < 3) {
-          // Rate-limited – wait and retry
-          const delay = attempt * 1000; // 1s, 2s, 3s
-          console.log(`Rate limited on ${model}, retrying in ${delay}ms (attempt ${attempt})`);
-          await new Promise(resolve => setTimeout(resolve, delay));
-          return callModel(model, attempt + 1);
-        }
-        throw new Error(errMsg);
-      }
-      return data;
-    };
-
-    let success = false;
     let lastError = null;
 
     for (const model of models) {
       try {
-        const data = await callModel(model);
-        const reply = data.choices?.[0]?.message?.content
+        console.log(`🔄 Trying Gemini model: ${model}`);
+        const response = await fetch(
+          `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`,
+          {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              contents: [{ role: 'user', parts: [{ text: fullPrompt }] }]
+            })
+          }
+        );
+
+        const data = await response.json();
+        if (!response.ok) {
+          const errorMsg = data.error?.message || `status ${response.status}`;
+          console.warn(`⚠️ Model ${model} failed: ${errorMsg}`);
+          lastError = new Error(errorMsg);
+          continue;   // try next model
+        }
+
+        const reply = data.candidates?.[0]?.content?.parts?.[0]?.text
                       ?? 'I could not generate a response. Please try again.';
+        console.log(`✅ Success with model: ${model}`);
         return res.json({ reply });
-      } catch (err) {
-        lastError = err;
-        console.warn(`Model ${model} failed: ${err.message}`);
+
+      } catch (fetchErr) {
+        console.warn(`⚠️ Network error with model ${model}: ${fetchErr.message}`);
+        lastError = fetchErr;
+        // continue to next model
       }
     }
 
     // All models failed
-    throw lastError || new Error('All free models are currently unavailable.');
+    console.error('❌ All Gemini models failed');
+    throw lastError || new Error('All Gemini models are currently unavailable.');
 
   } catch (err) {
     console.error('CHAT ERROR:', err);
-    res.status(500).json({ error: err.message || 'Server error' });
+    res.status(500).json({ error: err.message || 'Server error. Please try again later.' });
   }
 });
 // ─── Export for Vercel ──────────────────────────────
