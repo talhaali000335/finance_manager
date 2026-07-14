@@ -620,18 +620,15 @@ USER PROFILE:
 Answer the user's question concisely and helpfully.
 `.trim();
 
-    // Build the message array (system prompt + user messages)
     const chatMessages = [
       { role: 'system', content: systemPrompt },
-      ...messages.map(m => ({
-        role: m.role || 'user',
-        content: m.content || ''
-      }))
+      ...messages.map(m => ({ role: m.role || 'user', content: m.content || '' }))
     ];
 
     const apiKey = process.env.OPENROUTER_API_KEY;
     if (!apiKey) throw new Error('Missing OPENROUTER_API_KEY');
 
+    // Use the free Gemini model – must be exact slug
     const model = process.env.OPENROUTER_MODEL || 'google/gemini-2.0-flash-exp:free';
 
     const response = await fetch('https://openrouter.ai/api/v1/chat/completions', {
@@ -652,8 +649,13 @@ Answer the user's question concisely and helpfully.
 
     const data = await response.json();
     if (!response.ok) {
-      console.error('OpenRouter API error:', data);
-      throw new Error(data.error?.message || `OpenRouter returned status ${response.status}`);
+      console.error('OpenRouter error:', data);
+      const errMsg = data.error?.message || `OpenRouter returned status ${response.status}`;
+      // If the model is invalid, tell the user
+      if (data.error?.code === 'invalid_model') {
+        throw new Error(`Invalid model: ${model}. Check the model slug on OpenRouter.`);
+      }
+      throw new Error(errMsg);
     }
 
     const reply = data.choices?.[0]?.message?.content
@@ -661,7 +663,7 @@ Answer the user's question concisely and helpfully.
     res.json({ reply });
   } catch (err) {
     console.error('CHAT ERROR:', err);
-    res.status(500).json({ error: err.message || 'Server error. Please try again later.' });
+    res.status(500).json({ error: err.message });
   }
 });
 // ─── Export for Vercel ──────────────────────────────
