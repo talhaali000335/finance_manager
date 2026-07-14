@@ -597,8 +597,7 @@ app.get('/', (req, res) => {
   });
 });
 
-// ─── Gemini Chat Endpoint ───────────────────────────
-// ─── Gemini Chat Endpoint ───────────────────────────
+// ─── OpenRouter Chat Endpoint ──────────────────────
 app.post('/api/chat', authenticate, async (req, res) => {
   try {
     const { messages, userData } = req.body;
@@ -621,63 +620,48 @@ USER PROFILE:
 Answer the user's question concisely and helpfully.
 `.trim();
 
-    const userMessages = messages.map(m => m.content || '').join('\n');
-    const fullPrompt = systemPrompt + '\n\n' + userMessages;
+    // Build the message array (system prompt + user messages)
+    const chatMessages = [
+      { role: 'system', content: systemPrompt },
+      ...messages.map(m => ({
+        role: m.role || 'user',
+        content: m.content || ''
+      }))
+    ];
 
-    const apiKey = process.env.GEMINI_API_KEY;
-    if (!apiKey) throw new Error('Missing GEMINI_API_KEY');
+    const apiKey = process.env.OPENROUTER_API_KEY;
+    if (!apiKey) throw new Error('Missing OPENROUTER_API_KEY');
 
-    // Model selection – use environment variable or fallback
-    const primaryModel = process.env.GEMINI_MODEL || 'gemini-1.5-flash';
-    const fallbackModel = 'gemini-1.5-pro';
+    const model = process.env.OPENROUTER_MODEL || 'google/gemini-2.0-flash-exp:free';
 
-    // Helper function to call Gemini API
-    const callGemini = async (model) => {
-      const response = await fetch(
-        `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`,
-        {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            contents: [{ role: 'user', parts: [{ text: fullPrompt }] }]
-          })
-        }
-      );
-      const data = await response.json();
-      if (!response.ok) {
-        const err = new Error(data.error?.message || `Gemini returned status ${response.status}`);
-        err.status = response.status;
-        err.data = data;
-        throw err;
-      }
-      return data;
-    };
+    const response = await fetch('https://openrouter.ai/api/v1/chat/completions', {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${apiKey}`,
+        'Content-Type': 'application/json',
+        'HTTP-Referer': process.env.OPENROUTER_REFERER || 'https://your-app-domain.com',
+        'X-Title': process.env.OPENROUTER_TITLE || 'FinPath AI',
+      },
+      body: JSON.stringify({
+        model: model,
+        messages: chatMessages,
+        temperature: 0.7,
+        max_tokens: 1024,
+      }),
+    });
 
-    let data;
-    try {
-      // Try primary model
-      data = await callGemini(primaryModel);
-    } catch (err) {
-      // If primary model fails with 404 (model not found), try fallback
-      if (err.status === 404 && primaryModel !== fallbackModel) {
-        console.warn(`⚠️ Primary model "${primaryModel}" not found, falling back to "${fallbackModel}"`);
-        data = await callGemini(fallbackModel);
-      } else {
-        throw err;
-      }
+    const data = await response.json();
+    if (!response.ok) {
+      console.error('OpenRouter API error:', data);
+      throw new Error(data.error?.message || `OpenRouter returned status ${response.status}`);
     }
 
-    const reply = data.candidates?.[0]?.content?.parts?.[0]?.text
+    const reply = data.choices?.[0]?.message?.content
                   ?? 'I could not generate a response. Please try again.';
     res.json({ reply });
   } catch (err) {
     console.error('CHAT ERROR:', err);
-    // Send a user-friendly error
-    const status = err.status || 500;
-    const message = status === 404 
-      ? 'The AI model is not available. Please contact support.'
-      : err.message || 'Server error. Please try again later.';
-    res.status(status).json({ error: message });
+    res.status(500).json({ error: err.message || 'Server error. Please try again later.' });
   }
 });
 // ─── Export for Vercel ──────────────────────────────
