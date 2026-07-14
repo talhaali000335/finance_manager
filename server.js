@@ -641,11 +641,11 @@ Answer the user's question concisely and helpfully.
     }
 
     // ─── Gemini models in order of preference (fallback chain) ───
-    const models = [
-      'gemini-2.5-flash-preview-05-20',   // newest flash (experimental)
-      'gemini-2.0-flash',                 // stable flash
-      'gemini-1.5-flash',                 // previous generation fallback
-    ];
+    const models = const models = [
+  'gemini-2.5-flash',                // stable, free tier
+  'gemini-2.5-flash-lite',           // fallback
+  'gemini-3-flash-preview',          // preview (if still available)
+];
 
     let lastError = null;
 
