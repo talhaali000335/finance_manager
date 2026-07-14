@@ -452,9 +452,9 @@ Return ONLY the JSON, no additional text.
     }
 
     const models = [
-      'gemini-2.5-flash-preview-05-20',
-      'gemini-2.0-flash',
-      'gemini-1.5-flash',
+     'gemini-2.5-flash',                // stable, free tier
+  'gemini-2.5-flash-lite',           // fallback
+  'gemini-3-flash-preview',          // preview (if still available)
     ];
 
     let lastError = null;
@@ -641,7 +641,7 @@ Answer the user's question concisely and helpfully.
     }
 
     // ─── Gemini models in order of preference (fallback chain) ───
-    const models = const models = [
+   const models = [
   'gemini-2.5-flash',                // stable, free tier
   'gemini-2.5-flash-lite',           // fallback
   'gemini-3-flash-preview',          // preview (if still available)
