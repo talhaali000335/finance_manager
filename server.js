@@ -527,17 +527,23 @@ app.get('/api/cash-flow', authenticate, async (req, res) => {
     const netBalance = income - expenses;
 
     // Stable 6-month trend: income increases by 2% each month, expenses slightly wave
-    const months = ['MAY','JUN','JUL','AUG','SEP','OCT'];
-    const trend = months.map((month, idx) => {
-      const factor = 1 + idx * 0.02;
-      const incomeVal = Math.round(income * factor);
-      const expenseVal = Math.round(expenses * (1 + (idx - 2) * 0.01));
-      return {
-        month,
-        income: incomeVal,
-        expense: expenseVal,
-      };
-    });
+const allMonths = ['JAN','FEB','MAR','APR','MAY','JUN','JUL','AUG','SEP','OCT','NOV','DEC'];
+const now = new Date();
+const currentMonthIndex = now.getMonth();  // 0‑based (Jan = 0)
+
+const months = [];
+for (let i = 5; i >= 0; i--) {
+  const monthIndex = (currentMonthIndex - i + 12) % 12;
+  months.push(allMonths[monthIndex]);
+}
+
+// Use the dynamic months array instead of the hardcoded one
+const trend = months.map((month, idx) => {
+  const factor = 1 + idx * 0.02;
+  const incomeVal = Math.round(income * factor);
+  const expenseVal = Math.round(expenses * (1 + (idx - 2) * 0.01));
+  return { month, income: incomeVal, expense: expenseVal };
+});
 
     const breakdown = [
       { category: 'Salary', icon: 'work', amount: profile.primarySalary || 0, type: 'income', changePercent: 0 },
