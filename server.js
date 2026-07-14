@@ -91,6 +91,7 @@ const LinkedAccount = mongoose.model('LinkedAccount', linkedAccountSchema);
 // ─── Profile Model (added completedTasks field) ─────
 const profileSchema = new mongoose.Schema({
   userId: { type: String, required: true, unique: true },
+  profilePicture: { type: String, default: '' },   // <-- new
   age: Number,
   employment: String,
   country: String,
