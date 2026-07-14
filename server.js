@@ -628,9 +628,10 @@ Answer the user's question concisely and helpfully.
     const apiKey = process.env.OPENROUTER_API_KEY;
     if (!apiKey) throw new Error('Missing OPENROUTER_API_KEY');
 
-    // Use the environment variable, or fallback to a stable free model
-    const primaryModel = process.env.OPENROUTER_MODEL || 'meta-llama/llama-3.2-3b-instruct:free';
-    // If you prefer a Google model, try 'google/gemini-2.5-flash-lite-preview-05-20:free'
+    // ─── FORCE A WORKING FREE MODEL ─────────────────
+    // This model is currently available and free on OpenRouter.
+    // If it ever goes down, replace it with another from the list below.
+    const model = 'meta-llama/llama-3.2-3b-instruct:free';
 
     const response = await fetch('https://openrouter.ai/api/v1/chat/completions', {
       method: 'POST',
@@ -641,7 +642,7 @@ Answer the user's question concisely and helpfully.
         'X-Title': process.env.OPENROUTER_TITLE || 'FinPath AI',
       },
       body: JSON.stringify({
-        model: primaryModel,
+        model: model,
         messages: chatMessages,
         temperature: 0.7,
         max_tokens: 1024,
