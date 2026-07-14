@@ -135,55 +135,120 @@ const goalSchema = new mongoose.Schema({
 const Goal = mongoose.model('Goal', goalSchema);
 
 // ─── Tax Analysis Model (optional cache) ──────────
-const taxAnalysisSchema = new mongoose.Schema({
-  userId:        { type: String, required: true, unique: true },
-  annualTax:     Number,
-  effectiveRate: Number,
-  marginalRate:  Number,
-  federal:       Number,
-  state:         Number,
-  fica:          Number,
-  local:         Number,
-}, { timestamps: true });
-const TaxAnalysis = mongoose.model('TaxAnalysis', taxAnalysisSchema);
+// ─── TAX ANALYSIS – AI‑powered (Gemini) ───────────
+app.get('/api/tax-analysis', authenticate, async (req, res) => {
+  try {
+    const profile = await Profile.findOne({ userId: req.userId });
+    if (!profile) return res.status(404).json({ error: 'Profile not found' });
 
-// Helper: compute US federal income tax (simplified, single filer 2024)
-function computeFederalTax(income) {
-  const brackets = [
-    { min: 0, max: 11600, rate: 0.10 },
-    { min: 11601, max: 47150, rate: 0.12 },
-    { min: 47151, max: 100525, rate: 0.22 },
-    { min: 100526, max: 191950, rate: 0.24 },
-    { min: 191951, max: 243725, rate: 0.32 },
-    { min: 243726, max: 609350, rate: 0.35 },
-    { min: 609351, max: Infinity, rate: 0.37 }
-  ];
-  let tax = 0;
-  for (const b of brackets) {
-    if (income > b.min) {
-      const taxable = Math.min(income - b.min, b.max - b.min + 1);
-      tax += taxable * b.rate;
+    const income = (profile.primarySalary || 0) + (profile.sideIncome || 0);
+    const state = profile.state || 'NY';   // assume NY if not set, you can adjust
+    const filingStatus = profile.filingStatus || 'Single';
+    const currentDate = new Date().toISOString().split('T')[0];
+
+    const prompt = `
+You are a tax advisor. Based on the following user data, provide a tax analysis in JSON format.
+User data:
+- Annual income: $${income}
+- State: ${state}
+- Filing status: ${filingStatus}
+- Current date: ${currentDate}
+
+Output must be a valid JSON object with these exact keys:
+{
+  "annualTax": number (estimated total federal + state + FICA + local),
+  "effectiveRate": number (as percentage),
+  "marginalRate": number (as percentage),
+  "breakdown": {
+    "federal": number,
+    "state": number,
+    "fica": number,
+    "local": number
+  },
+  "tips": [
+    {"icon": "account_balance", "title": "string", "description": "string"},
+    {"icon": "health_and_safety", "title": "string", "description": "string"}
+  ]
+}
+Return ONLY the JSON, no additional text.
+`.trim();
+
+    const apiKey = process.env.GEMINI_API_KEY;
+    if (!apiKey) {
+      console.error('❌ Missing GEMINI_API_KEY');
+      return res.status(500).json({ error: 'Server configuration error: missing API key' });
     }
+
+    // Models to try (fallback chain)
+    const models = [
+      'gemini-2.5-flash-preview-05-20',
+      'gemini-2.0-flash',
+      'gemini-1.5-flash',
+    ];
+
+    let lastError = null;
+    for (const model of models) {
+      try {
+        console.log(`🔍 Calling Gemini for tax analysis using model: ${model}`);
+        const response = await fetch(
+          `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`,
+          {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              contents: [{ role: 'user', parts: [{ text: prompt }] }]
+            })
+          }
+        );
+
+        const data = await response.json();
+        if (!response.ok) {
+          const errMsg = data.error?.message || `status ${response.status}`;
+          console.warn(`⚠️ Model ${model} failed: ${errMsg}`);
+          lastError = new Error(errMsg);
+          continue;   // try next model
+        }
+
+        const rawText = data.candidates?.[0]?.content?.parts?.[0]?.text;
+        if (!rawText) {
+          lastError = new Error('No content returned from Gemini');
+          continue;
+        }
+
+        // Extract the JSON from the response (sometimes wrapped in ```json blocks)
+        const jsonStr = rawText.replace(/```json|```/g, '').trim();
+        const analysis = JSON.parse(jsonStr);
+
+        // Basic validation
+        if (analysis.annualTax == null || analysis.effectiveRate == null) {
+          throw new Error('Incomplete data from Gemini');
+        }
+
+        // Optionally save to DB (if you want to cache)
+        await TaxAnalysis.findOneAndUpdate(
+          { userId: req.userId },
+          { ...analysis, userId: req.userId },
+          { upsert: true, new: true }
+        );
+
+        console.log(`✅ Gemini tax analysis successful with model: ${model}`);
+        return res.json(analysis);
+
+      } catch (err) {
+        console.warn(`⚠️ Error with model ${model}: ${err.message}`);
+        lastError = err;
+      }
+    }
+
+    // All models failed
+    console.error('❌ All Gemini models failed for tax analysis');
+    throw lastError || new Error('Unable to generate tax analysis. Please try again later.');
+
+  } catch (err) {
+    console.error('TAX ANALYSIS ERROR:', err);
+    res.status(500).json({ error: err.message || 'Server error' });
   }
-  return tax;
-}
-
-function computeNYStateTax(income) {
-  return income * 0.06;
-}
-
-function computeFICA(income) {
-  const ssRate = 0.062, medicareRate = 0.0145;
-  const ssLimit = 168600;
-  const ssTax = Math.min(income, ssLimit) * ssRate;
-  const medicareTax = income * medicareRate;
-  return ssTax + medicareTax;
-}
-
-function computeLocalTax(income) {
-  return income * 0.015;
-}
-
+});
 // ─── JWT Helpers ────────────────────────────────────
 const generateToken = (userId) => {
   return jwt.sign({ userId }, JWT_SECRET, { expiresIn: JWT_EXPIRES_IN });
