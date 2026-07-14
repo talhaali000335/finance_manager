@@ -513,55 +513,6 @@ app.post('/api/action-plan/task-done', authenticate, async (req, res) => {
   }
 });
 
-// ─── TAX ANALYSIS ────────────────────────────────────
-app.get('/api/tax-analysis', authenticate, async (req, res) => {
-  try {
-    const profile = await Profile.findOne({ userId: req.userId });
-    if (!profile) return res.status(404).json({ error: 'Profile not found' });
-
-    const income = (profile.primarySalary || 0) + (profile.sideIncome || 0);
-    const federal = computeFederalTax(income);
-    const state = computeNYStateTax(income);
-    const fica = computeFICA(income);
-    const local = computeLocalTax(income);
-    const annualTax = federal + state + fica + local;
-    const effectiveRate = income > 0 ? (annualTax / income) * 100 : 0;
-    let marginalRate = 0.10;
-    const brackets = [11600,47150,100525,191950,243725,609350,Infinity];
-    for (const b of brackets) {
-      if (income <= b) {
-        marginalRate = b === 11600 ? 0.10 : (b === 47150 ? 0.12 : b === 100525 ? 0.22 : b === 191950 ? 0.24 : b === 243725 ? 0.32 : b === 609350 ? 0.35 : 0.37);
-        break;
-      }
-    }
-
-    res.json({
-      annualTax,
-      effectiveRate: parseFloat(effectiveRate.toFixed(1)),
-      marginalRate: parseFloat((marginalRate * 100).toFixed(1)),
-      breakdown: {
-        federal,
-        state,
-        fica,
-        local,
-      },
-      tips: [
-        {
-          icon: 'account_balance',
-          title: 'Max out 401(k) Contributions',
-          description: 'You are currently $4,500 short of the $23,000 limit. Contributing the max could save you ~$1,080 in federal taxes.'
-        },
-        {
-          icon: 'health_and_safety',
-          title: 'HSA Catch-up',
-          description: 'Review your Health Savings Account. Contributions are tax-deductible and lower your taxable income.'
-        }
-      ]
-    });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-});
 
 // ─── CASH FLOW ENDPOINT (STABLE TREND, NO RANDOM) ────
 app.get('/api/cash-flow', authenticate, async (req, res) => {
