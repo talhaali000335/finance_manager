@@ -157,6 +157,19 @@ const goalSchema = new mongoose.Schema({
 const Goal = mongoose.model('Goal', goalSchema);
 
 
+// ─── Subscription Model ────────────────────────────
+const subscriptionSchema = new mongoose.Schema({
+  userId:           { type: String, required: true, unique: true },
+  plan:             { type: String, enum: ['monthly', 'yearly', 'none'], default: 'none' },
+  active:           { type: Boolean, default: false },
+  startDate:        { type: Date },
+  endDate:          { type: Date },            // optional – for yearly, set 1 year ahead
+  cancelAtPeriodEnd:{ type: Boolean, default: false },
+}, { timestamps: true });
+
+const Subscription = mongoose.model('Subscription', subscriptionSchema);
+
+
 
 // ─── JWT Helpers ────────────────────────────────────
 const generateToken = (userId) => {
@@ -535,6 +548,61 @@ Return ONLY the JSON, no additional text.
 });
 
 
+
+// ─── GET current subscription ──────────────────────
+app.get('/api/subscription', authenticate, async (req, res) => {
+  try {
+    const sub = await Subscription.findOne({ userId: req.userId });
+    res.json(sub || { plan: 'none', active: false });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ─── POST activate subscription (after Google Pay purchase) ─
+app.post('/api/subscription', authenticate, async (req, res) => {
+  try {
+    const { plan } = req.body;
+    if (!['monthly', 'yearly'].includes(plan)) {
+      return res.status(400).json({ error: 'Invalid plan' });
+    }
+
+    const startDate = new Date();
+    const endDate = new Date();
+    if (plan === 'yearly') {
+      endDate.setFullYear(endDate.getFullYear() + 1);
+    } else {
+      endDate.setMonth(endDate.getMonth() + 1);
+    }
+
+    const sub = await Subscription.findOneAndUpdate(
+      { userId: req.userId },
+      { plan, active: true, startDate, endDate, cancelAtPeriodEnd: false },
+      { new: true, upsert: true }
+    );
+    res.json(sub);
+  } catch (err) {
+    res.status(400).json({ error: err.message });
+  }
+});
+
+// ─── DELETE cancel subscription ─────────────────────
+app.delete('/api/subscription', authenticate, async (req, res) => {
+  try {
+    const sub = await Subscription.findOne({ userId: req.userId });
+    if (!sub) return res.status(404).json({ error: 'No subscription found' });
+
+    sub.cancelAtPeriodEnd = true;
+    await sub.save();
+    // In real life you would also call Google/Apple API to cancel the subscription
+
+    res.json({ message: 'Subscription will be cancelled at the end of the current period.' });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+
 // ─── CASH FLOW ENDPOINT (STABLE TREND, NO RANDOM) ────
 app.get('/api/cash-flow', authenticate, async (req, res) => {
   try {
@@ -633,6 +701,9 @@ app.delete('/api/linked-accounts/:id', authenticate, async (req, res) => {
     res.status(400).json({ error: err.message });
   }
 });
+
+
+
 
 // ─── Health check ───────────────────────────────────
 app.get('/', (req, res) => {
