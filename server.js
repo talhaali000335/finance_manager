@@ -717,10 +717,22 @@ app.get('/', (req, res) => {
 
 app.post('/api/chat', authenticate, async (req, res) => {
   try {
-    const { messages, userData } = req.body;
+    const { messages } = req.body;
     if (!Array.isArray(messages) || messages.length === 0) {
       return res.status(400).json({ error: 'messages must be a non-empty array' });
     }
+
+    // ─── Fetch real user data from DB ─────────────────
+    const profile = await Profile.findOne({ userId: req.userId });
+    const goals = await Goal.find({ userId: req.userId });
+
+    // Calculate net worth, income, expenses from profile
+    const assets = (profile?.cashSavings || 0) + (profile?.investments || 0) + (profile?.propertyValue || 0);
+    const liabilities = (profile?.totalLoans || 0) + (profile?.creditCardDebt || 0) + (profile?.monthlyEMI || 0);
+    const netWorth = assets - liabilities;
+
+    const monthlyIncome = (profile?.primarySalary || 0) + (profile?.sideIncome || 0);
+    const monthlyExpenses = (profile?.rent || 0) + (profile?.food || 0) + (profile?.transport || 0) + (profile?.entertainment || 0) + (profile?.monthlyEMI || 0);
 
     const systemPrompt = `
 You are a helpful, personal financial advisor.
@@ -728,11 +740,12 @@ Use the following real user data to give precise, actionable advice.
 Never make up numbers – refer to the data provided.
 
 USER PROFILE:
-- Net worth: $${userData.netWorth ?? 0}
-- Monthly income: $${userData.monthlyIncome ?? 0}
-- Monthly expenses: $${userData.monthlyExpenses ?? 0}
-- Goals: ${JSON.stringify(userData.goals ?? [])}
-- Achievements: ${JSON.stringify(userData.achievements ?? [])}
+- Net worth: $${netWorth}
+- Monthly income: $${monthlyIncome}
+- Monthly expenses: $${monthlyExpenses}
+- Goals: ${JSON.stringify(goals.map(g => ({ name: g.name || g.goalType, target: g.targetAmount, date: g.targetDate })))}
+- Assets breakdown: Cash & Savings: $${profile?.cashSavings || 0}, Investments: $${profile?.investments || 0}, Property: $${profile?.propertyValue || 0}
+- Liabilities: Loans: $${profile?.totalLoans || 0}, Credit Card Debt: $${profile?.creditCardDebt || 0}, Monthly EMI: $${profile?.monthlyEMI || 0}
 
 Answer the user's question concisely and helpfully.
 `.trim();
@@ -740,21 +753,20 @@ Answer the user's question concisely and helpfully.
     const userMessages = messages.map(m => m.content || '').join('\n');
     const fullPrompt = systemPrompt + '\n\n' + userMessages;
 
+    // ─── Gemini call (unchanged) ───────────────────────
     const apiKey = process.env.GEMINI_API_KEY;
     if (!apiKey) {
       console.error('❌ Missing GEMINI_API_KEY');
       return res.status(500).json({ error: 'Server configuration error: missing API key' });
     }
 
-    // ─── Gemini models in order of preference (fallback chain) ───
-   const models = [
-  'gemini-2.5-flash',                // stable, free tier
-  'gemini-2.5-flash-lite',           // fallback
-  'gemini-3-flash-preview',          // preview (if still available)
-];
+    const models = [
+      'gemini-2.5-flash',
+      'gemini-2.5-flash-lite',
+      'gemini-3-flash-preview',
+    ];
 
     let lastError = null;
-
     for (const model of models) {
       try {
         console.log(`🔄 Trying Gemini model: ${model}`);
@@ -774,7 +786,7 @@ Answer the user's question concisely and helpfully.
           const errorMsg = data.error?.message || `status ${response.status}`;
           console.warn(`⚠️ Model ${model} failed: ${errorMsg}`);
           lastError = new Error(errorMsg);
-          continue;   // try next model
+          continue;
         }
 
         const reply = data.candidates?.[0]?.content?.parts?.[0]?.text
@@ -785,11 +797,9 @@ Answer the user's question concisely and helpfully.
       } catch (fetchErr) {
         console.warn(`⚠️ Network error with model ${model}: ${fetchErr.message}`);
         lastError = fetchErr;
-        // continue to next model
       }
     }
 
-    // All models failed
     console.error('❌ All Gemini models failed');
     throw lastError || new Error('All Gemini models are currently unavailable.');
 
@@ -798,8 +808,6 @@ Answer the user's question concisely and helpfully.
     res.status(500).json({ error: err.message || 'Server error. Please try again later.' });
   }
 });
-
-
 
 
 
