@@ -606,9 +606,11 @@ app.delete('/api/subscription', authenticate, async (req, res) => {
 // ─── CASH FLOW ENDPOINT (STABLE TREND, NO RANDOM) ────
 app.get('/api/cash-flow', authenticate, async (req, res) => {
   try {
-    const profile = await Profile.findOne({ userId: req.userId });
-    if (!profile) return res.status(404).json({ error: 'Profile not found' });
-
+      try {
+    let profile = await Profile.findOne({ userId: req.userId });
+    if (!profile) {
+      profile = await Profile.create({ userId: req.userId });
+    }
     const income = (profile.primarySalary || 0) + (profile.sideIncome || 0);
     const expenses = (profile.rent || 0) + (profile.food || 0) + (profile.transport || 0) + (profile.entertainment || 0) + (profile.monthlyEMI || 0);
     const netBalance = income - expenses;
