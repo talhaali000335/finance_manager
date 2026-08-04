@@ -1372,6 +1372,127 @@ Output ONLY a JSON object with this exact structure, no extra text:
 });
 
 
+// ─── HOME DASHBOARD (fully dynamic) ─────────────────
+app.get('/api/home-dashboard', authenticate, async (req, res) => {
+  try {
+    const profile = await Profile.findOne({ userId: req.userId });
+    const goals = await Goal.find({ userId: req.userId }).sort({ priority: -1, createdAt: -1 });
+
+    if (!profile) return res.status(404).json({ error: 'Profile not found' });
+
+    const user = await User.findById(req.userId);
+    const userName = user?.name || 'there';
+    const hour = new Date().getHours();
+    const greeting = hour < 12 ? `Good morning, ${userName}` :
+                     hour < 18 ? `Good afternoon, ${userName}` :
+                     `Good evening, ${userName}`;
+
+    // Profile picture
+    const profilePic = profile.profilePicture || '';
+
+    // Primary goal
+    const primaryGoal = goals.length > 0 ? goals[0] : null;
+    let goalProgress = 0, goalTitle = 'No goal set', goalAmount = '';
+    if (primaryGoal) {
+      const target = primaryGoal.targetAmount || 0;
+      const saved = primaryGoal.existingSavings || 0;
+      goalProgress = target > 0 ? Math.min(saved / target, 1) : 0;
+      goalTitle = primaryGoal.name || primaryGoal.goalType;
+      goalAmount = `$${saved.toFixed(0)} of $${target.toFixed(0)}`;
+    }
+
+    // AI Insight & Quote
+    const income = (profile.primarySalary || 0) + (profile.sideIncome || 0);
+    const expenses = (profile.rent || 0) + (profile.food || 0) + (profile.transport || 0) +
+                     (profile.entertainment || 0) + (profile.monthlyEMI || 0);
+
+    const insightPrompt = `
+You are a personal finance coach. Based on the user's real data, generate a short, encouraging insight for their home screen.
+USER DATA:
+- Monthly income: $${income}
+- Monthly expenses: $${expenses}
+- Primary goal: ${primaryGoal ? `${goalTitle}, target $${primaryGoal.targetAmount}, saved $${primaryGoal.existingSavings || 0}` : 'none set'}
+
+Output ONLY a JSON object with these exact keys:
+{
+  "insightTitle": "a short, powerful insight title",
+  "insightBody": "1-2 sentences personalized insight",
+  "insightButtonLabel": "short button label like 'Read Full Analysis'",
+  "quoteText": "a short motivational quote related to finance",
+  "quoteAuthor": "author of the quote"
+}
+`.trim();
+
+    let aiResponse;
+    try {
+      const { text } = await callAI(insightPrompt, null, true);
+      aiResponse = extractJson(text);
+    } catch (e) {
+      aiResponse = {
+        insightTitle: 'Your Financial Snapshot',
+        insightBody: 'Keep up the great work!',
+        insightButtonLabel: 'Read Full Analysis',
+        quoteText: 'Financial freedom is not about how much you make, but how much you keep.',
+        quoteAuthor: 'Robert Kiyosaki'
+      };
+    }
+
+    // Habit Streak (based on completed tasks count)
+    const completedCount = (profile.completedTasks || []).length;
+    const activeDays = Math.min(completedCount, 7);
+    const streak = {
+      days: ['M', 'T', 'W', 'T', 'F', 'S', 'S'],
+      activeIndices: Array.from({ length: activeDays }, (_, i) => i)
+    };
+
+    // Badges (dynamic based on completed tasks count)
+    const badges = [];
+    if (completedCount >= 1) badges.push({ type: 'shield', color: '#A7F3D0', iconColor: '#059669' });
+    if (completedCount >= 3) badges.push({ type: 'heart', color: '#FDE68A', iconColor: '#D97706' });
+    if (completedCount >= 5) badges.push({ type: 'globe', color: '#BFDBFE', iconColor: '#2563EB' });
+    if (badges.length === 0) {
+      badges.push({ type: 'shield', color: '#F3F4F6', iconColor: '#9CA3AF' });
+      badges.push({ type: 'heart', color: '#F3F4F6', iconColor: '#9CA3AF' });
+      badges.push({ type: 'globe', color: '#F3F4F6', iconColor: '#9CA3AF' });
+    }
+
+    // Action buttons (dynamic based on goals)
+    const actions = [];
+    // Static image URLs – you can replace these with your actual hosted images
+    const baseImgUrl = 'https://lh3.googleusercontent.com/aida-public/';
+    actions.push({ imageUrl: baseImgUrl + 'AB6AXuDZnlBUimIZjxl-2oBH0lsJX4SD0g-xoPPNoOGJvV41dOo_g3ARgEuX8Yllivds11Cf3qG-TRw7N9IJ-I4KPABFytesOJ2lLTb6yfISZsZTN1Vn5-8CYSA_RnKdHlRhnctvbFoec9o_oC4qei0R2s7KpwfSG2a5Pnihpq0LtbhugU6V6R-sqI0BlN93LcqRn0c3MMKOfR944aM_0Sc8kWfTewpykSSuENhZ2XB44Gbnw6L_bWYw9Vpf', label: 'Journey' });
+    if (goals.length > 0) {
+      actions.push({ imageUrl: baseImgUrl + 'AB6AXuAE5YuEX_EuafoWVLql1ngFZw-kGEohRCxZq2XI7LDe2Bb9NYQw-4w5Iw96MW1pfx3VLQF36y4x80EDnqee4q8QD1mX_t6e3dSrF1G7vyQYFE2N4YPiY0qjJ1OscNhjHiMQa17My7FoigFVorQUG-en2L9Yl2Nn8jeGr3Y1OYEZCopFYaHiVmoKDdGssn9E3BffywpMZE1gWPR5dOQtxC1HWH5W9WWY56sQCUutu1-unA8Rb9iTwXU_', label: 'Coach' });
+    } else {
+      actions.push({ imageUrl: baseImgUrl + 'AB6AXuAPxr6CwtWymbHkUpDEK-S_OIXWxkK6XlGm1e15tKLzDDiUUHrYB_txGLiM1mkRlMIkiY6MIkZ2NBjkH6B5G05CouS11mF9oHIZDD3rbWsO8r-Gnr14ONQNpZd7X5HVP5ThK9dtOK0zC7pFWQNNqDPg8hBIRbHXmXdXcJ5RdGdQQD1ShfLKoPzZj1J4UQp9P9W5Hot8iXAqvx9VWvASbLPRiylGAAvt98yYJ2stsvR7BaMlBYDThcyN', label: 'Insights' });
+    }
+    actions.push({ imageUrl: baseImgUrl + 'AB6AXuAPxr6CwtWymbHkUpDEK-S_OIXWxkK6XlGm1e15tKLzDDiUUHrYB_txGLiM1mkRlMIkiY6MIkZ2NBjkH6B5G05CouS11mF9oHIZDD3rbWsO8r-Gnr14ONQNpZd7X5HVP5ThK9dtOK0zC7pFWQNNqDPg8hBIRbHXmXdXcJ5RdGdQQD1ShfLKoPzZj1J4UQp9P9W5Hot8iXAqvx9VWvASbLPRiylGAAvt98yYJ2stsvR7BaMlBYDThcyN', label: 'Insights' });
+    actions.push({ imageUrl: baseImgUrl + 'AB6AXuAE5YuEX_EuafoWVLql1ngFZw-kGEohRCxZq2XI7LDe2Bb9NYQw-4w5Iw96MW1pfx3VLQF36y4x80EDnqee4q8QD1mX_t6e3dSrF1G7vyQYFE2N4YPiY0qjJ1OscNhjHiMQa17My7FoigFVorQUG-en2L9Yl2Nn8jeGr3Y1OYEZCopFYaHiVmoKDdGssn9E3BffywpMZE1gWPR5dOQtxC1HWH5W9WWY56sQCUutu1-unA8Rb9iTwXU_', label: 'Coach' });
+
+    const responseData = {
+      greeting,
+      profileImageUrl: profilePic,
+      goalProgress,
+      goalTitle,
+      goalAmount,
+      insightTitle: aiResponse.insightTitle,
+      insightBody: aiResponse.insightBody,
+      insightButtonLabel: aiResponse.insightButtonLabel,
+      quoteText: aiResponse.quoteText,
+      quoteAuthor: aiResponse.quoteAuthor,
+      streak,
+      badges,
+      actions,
+    };
+
+    res.json(responseData);
+  } catch (err) {
+    console.error('HOME DASHBOARD ERROR:', err);
+    res.status(500).json({ error: err.message || 'Internal server error' });
+  }
+});
+
+
 
 // ─── Export for Vercel ──────────────────────────────
 module.exports = app;
