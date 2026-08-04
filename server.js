@@ -91,7 +91,7 @@ const LinkedAccount = mongoose.model('LinkedAccount', linkedAccountSchema);
 // ─── Monthly Snapshot Model ──────────────────────
 const monthlySnapshotSchema = new mongoose.Schema({
   userId:    { type: String, required: true },
-  monthKey:  { type: String, required: true },   // e.g. "2026-07"
+  monthKey:  { type: String, required: true },
   income:    { type: Number, default: 0 },
   expenses:  { type: Number, default: 0 },
 }, { timestamps: true });
@@ -100,11 +100,10 @@ monthlySnapshotSchema.index({ userId: 1, monthKey: 1 }, { unique: true });
 
 const MonthlySnapshot = mongoose.model('MonthlySnapshot', monthlySnapshotSchema);
 
-// ─── Weekly Snapshot Model (NEW – powers real chart bars) ───
-// ISO week key, e.g. "2026-W31", so weeks are unambiguous across years.
+// ─── Weekly Snapshot Model ───
 const weeklySnapshotSchema = new mongoose.Schema({
   userId:    { type: String, required: true },
-  weekKey:   { type: String, required: true },   // e.g. "2026-W31"
+  weekKey:   { type: String, required: true },
   income:    { type: Number, default: 0 },
   expenses:  { type: Number, default: 0 },
 }, { timestamps: true });
@@ -113,7 +112,6 @@ weeklySnapshotSchema.index({ userId: 1, weekKey: 1 }, { unique: true });
 
 const WeeklySnapshot = mongoose.model('WeeklySnapshot', weeklySnapshotSchema);
 
-// Helper: ISO 8601 week key for "this week" bucketing
 function getIsoWeekKey(date = new Date()) {
   const d = new Date(Date.UTC(date.getFullYear(), date.getMonth(), date.getDate()));
   const dayNum = d.getUTCDay() || 7;
@@ -204,6 +202,116 @@ const authenticate = async (req, res, next) => {
     res.status(401).json({ error: 'Invalid or expired token.' });
   }
 };
+
+// ─── AI PROVIDER HELPER (Groq primary → Gemini fallback) ───
+// Centralizes the multi-provider chat-completion call so every AI-backed
+// route (chat, financial-insight, tax-analysis, insight/today) shares the
+// exact same fallback chain instead of duplicating it four times.
+const GROQ_KEY = process.env.GROQ_API_KEY;
+const GEMINI_KEY = process.env.GEMINI_API_KEY;
+
+function buildProviderChain() {
+  const providers = [];
+  if (GROQ_KEY) {
+    providers.push(
+      { type: 'groq', model: 'llama-3.3-70b-versatile' },
+      { type: 'groq', model: 'llama-3.1-8b-instant' }
+    );
+  }
+  if (GEMINI_KEY) {
+    providers.push(
+      { type: 'gemini', model: 'gemini-2.5-flash' },
+      { type: 'gemini', model: 'gemini-2.5-flash-lite' },
+      { type: 'gemini', model: 'gemini-3-flash-preview' }
+    );
+  }
+  return providers;
+}
+
+/**
+ * Runs a prompt through the provider chain and returns the first successful
+ * raw text reply. Throws the last error if every provider fails.
+ * @param {string} prompt - full prompt text (used for Gemini and as fallback for Groq)
+ * @param {Array<{role:string, content:string}>} [chatMessages] - optional structured
+ *        messages for providers that support role-based chat (Groq). If omitted,
+ *        the raw prompt is sent as a single user message.
+ */
+async function callAI(prompt, chatMessages = null) {
+  const providers = buildProviderChain();
+  if (providers.length === 0) {
+    throw new Error('Server configuration error: no AI provider keys set (GROQ_API_KEY or GEMINI_API_KEY)');
+  }
+
+  let lastError = null;
+
+  for (const provider of providers) {
+    try {
+      console.log(`🔄 Trying provider: ${provider.type}/${provider.model}`);
+      let text = null;
+
+      if (provider.type === 'groq') {
+        const messages = chatMessages && chatMessages.length
+          ? chatMessages
+          : [{ role: 'user', content: prompt }];
+
+        const response = await fetch('https://api.groq.com/openai/v1/chat/completions', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'Authorization': `Bearer ${GROQ_KEY}`,
+          },
+          body: JSON.stringify({
+            model: provider.model,
+            messages,
+            temperature: 0.7,
+          }),
+        });
+
+        const data = await response.json();
+        if (!response.ok) {
+          throw new Error(data.error?.message || `Groq returned status ${response.status}`);
+        }
+        text = data.choices?.[0]?.message?.content;
+      }
+
+      if (provider.type === 'gemini') {
+        const response = await fetch(
+          `https://generativelanguage.googleapis.com/v1beta/models/${provider.model}:generateContent?key=${GEMINI_KEY}`,
+          {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              contents: [{ role: 'user', parts: [{ text: prompt }] }],
+            }),
+          }
+        );
+
+        const data = await response.json();
+        if (!response.ok) {
+          throw new Error(data.error?.message || `Gemini returned status ${response.status}`);
+        }
+        text = data.candidates?.[0]?.content?.parts?.[0]?.text;
+      }
+
+      if (!text) {
+        throw new Error(`No content returned from ${provider.type}/${provider.model}`);
+      }
+
+      console.log(`✅ Success with ${provider.type}/${provider.model}`);
+      return { text, providerUsed: `${provider.type}/${provider.model}` };
+
+    } catch (err) {
+      console.warn(`⚠️ Provider ${provider.type}/${provider.model} failed: ${err.message}`);
+      lastError = err;
+    }
+  }
+
+  throw lastError || new Error('All AI providers are currently unavailable.');
+}
+
+function stripJsonFence(text) {
+  return text.replace(/```json|```/g, '').trim();
+}
 
 // ─── AUTH ROUTES ────────────────────────────────────
 app.post('/api/auth/signup', async (req, res) => {
@@ -363,7 +471,7 @@ app.put('/api/profile/:userId', authenticate, authorizeProfileAccess, async (req
   }
 });
 
-// ─── FINANCIAL FLOW INSIGHT (Gemini) ──────────────
+// ─── FINANCIAL FLOW INSIGHT (Groq → Gemini) ──────────────
 app.get('/api/financial-insight', authenticate, async (req, res) => {
   try {
     const profile = await Profile.findOne({ userId: req.userId });
@@ -389,65 +497,31 @@ You are a compassionate financial coach. Based on the user's real data, write a 
 }
 The focusAreas represent how the user's budget breaks down (e.g., Pause = discretionary, Nourish = essentials, Sustain = savings). Percentages should add up to 100.
 Never invent numbers – use the real data.
+
+USER DATA:
+- Monthly income: $${income}
+- Monthly expenses: $${expenses}
+- Primary goal: ${primaryGoal ? `${primaryGoal.name || primaryGoal.goalType}, target $${primaryGoal.targetAmount}` : 'none set'}
 `.trim();
 
-    const apiKey = process.env.GEMINI_API_KEY;
-    if (!apiKey) return res.status(500).json({ error: 'Server configuration error: missing GEMINI_API_KEY' });
-
-    const models = [
-      'gemini-2.5-flash',
-      'gemini-2.5-flash-lite',
-      'gemini-3-flash-preview',
-    ];
-
-    let lastError = null;
-    for (const model of models) {
-      try {
-        console.log(`🔍 Trying Gemini for financial insight with model: ${model}`);
-        const response = await fetch(
-          `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`,
-          {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              contents: [{ role: 'user', parts: [{ text: prompt }] }]
-            })
-          }
-        );
-
-        const data = await response.json();
-        if (!response.ok) {
-          throw new Error(data.error?.message || `Gemini returned status ${response.status}`);
-        }
-
-        const rawText = data.candidates?.[0]?.content?.parts?.[0]?.text;
-        if (!rawText) throw new Error('No content returned from Gemini');
-
-        const jsonStr = rawText.replace(/```json|```/g, '').trim();
-        const analysis = JSON.parse(jsonStr);
-
-        if (!analysis.title || !analysis.summary || !analysis.focusAreas) {
-          throw new Error('Incomplete data from Gemini');
-        }
-
-        console.log(`✅ Financial insight generated with model: ${model}`);
-        return res.json(analysis);
-
-      } catch (err) {
-        console.warn(`⚠️ Model ${model} failed: ${err.message}`);
-        lastError = err;
+    let analysis;
+    try {
+      const { text } = await callAI(prompt);
+      analysis = JSON.parse(stripJsonFence(text));
+      if (!analysis.title || !analysis.summary || !analysis.focusAreas) {
+        throw new Error('Incomplete data from AI provider');
       }
+    } catch (err) {
+      console.error('❌ All AI providers failed for financial insight:', err.message);
+      return res.status(502).json({ error: err.message || 'Unable to generate financial insight. Please try again later.' });
     }
 
-    console.error('❌ All Gemini models failed for financial insight');
-    throw lastError || new Error('Unable to generate financial insight. Please try again later.');
-
+    res.json(analysis);
   } catch (err) {
     console.error('FINANCIAL INSIGHT ERROR:', err);
     res.status(500).json({ error: err.message || 'Internal server error' });
   }
 });
-
 
 // ─── ACTION PLAN ENDPOINT ────────────────────────────
 app.get('/api/action-plan', authenticate, async (req, res) => {
@@ -537,7 +611,7 @@ app.post('/api/action-plan/task-done', authenticate, async (req, res) => {
   }
 });
 
-// ─── TAX ANALYSIS – AI-powered (Gemini) ─────────────
+// ─── TAX ANALYSIS – AI-powered (Groq → Gemini) ─────────────
 app.get('/api/tax-analysis', authenticate, async (req, res) => {
   try {
     const profile = await Profile.findOne({ userId: req.userId });
@@ -575,59 +649,19 @@ Output must be a valid JSON object with these exact keys:
 Return ONLY the JSON, no additional text.
 `.trim();
 
-    const apiKey = process.env.GEMINI_API_KEY;
-    if (!apiKey) {
-      return res.status(500).json({ error: 'Server configuration error: missing GEMINI_API_KEY' });
-    }
-
-    const models = [
-      'gemini-2.5-flash',
-      'gemini-2.5-flash-lite',
-      'gemini-3-flash-preview',
-    ];
-
-    let lastError = null;
-    for (const model of models) {
-      try {
-        console.log(`🔍 Trying Gemini for tax analysis with model: ${model}`);
-        const response = await fetch(
-          `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`,
-          {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              contents: [{ role: 'user', parts: [{ text: prompt }] }]
-            })
-          }
-        );
-
-        const data = await response.json();
-        if (!response.ok) {
-          throw new Error(data.error?.message || `Gemini returned status ${response.status}`);
-        }
-
-        const rawText = data.candidates?.[0]?.content?.parts?.[0]?.text;
-        if (!rawText) throw new Error('No content returned from Gemini');
-
-        const jsonStr = rawText.replace(/```json|```/g, '').trim();
-        const analysis = JSON.parse(jsonStr);
-
-        if (analysis.annualTax == null || analysis.effectiveRate == null) {
-          throw new Error('Incomplete data from Gemini');
-        }
-
-        console.log(`✅ Tax analysis generated with model: ${model}`);
-        return res.json(analysis);
-
-      } catch (err) {
-        console.warn(`⚠️ Model ${model} failed: ${err.message}`);
-        lastError = err;
+    let analysis;
+    try {
+      const { text } = await callAI(prompt);
+      analysis = JSON.parse(stripJsonFence(text));
+      if (analysis.annualTax == null || analysis.effectiveRate == null) {
+        throw new Error('Incomplete data from AI provider');
       }
+    } catch (err) {
+      console.error('❌ All AI providers failed for tax analysis:', err.message);
+      return res.status(502).json({ error: err.message || 'Unable to generate tax analysis. Please try again later.' });
     }
 
-    console.error('❌ All Gemini models failed for tax analysis');
-    throw lastError || new Error('Unable to generate tax analysis. Please try again later.');
-
+    res.json(analysis);
   } catch (err) {
     console.error('TAX ANALYSIS ERROR:', err);
     res.status(500).json({ error: err.message || 'Internal server error' });
@@ -704,7 +738,6 @@ app.get('/api/cash-flow', authenticate, async (req, res) => {
       { upsert: true, new: true }
     );
 
-    // Also seed this week's snapshot so weekly bars have real data
     const currentWeekKey = getIsoWeekKey(now);
     await WeeklySnapshot.findOneAndUpdate(
       { userId: req.userId, weekKey: currentWeekKey },
@@ -791,7 +824,7 @@ app.get('/', (req, res) => {
   });
 });
 
-// ─── TODAY'S INSIGHT – AI-powered (Gemini) + real chart data ───
+// ─── TODAY'S INSIGHT – AI-powered (Groq → Gemini) + real chart data ───
 app.get('/api/insight/today', authenticate, async (req, res) => {
   try {
     const profile = await Profile.findOne({ userId: req.userId });
@@ -800,7 +833,6 @@ app.get('/api/insight/today', authenticate, async (req, res) => {
     const monthlyIncome = (profile?.primarySalary || 0) + (profile?.sideIncome || 0);
     const monthlyExpenses = (profile?.rent || 0) + (profile?.food || 0) + (profile?.transport || 0) + (profile?.entertainment || 0) + (profile?.monthlyEMI || 0);
 
-    // ─── Ensure this week's snapshot exists, then pull last 6 weeks ───
     const now = new Date();
     const currentWeekKey = getIsoWeekKey(now);
     await WeeklySnapshot.findOneAndUpdate(
@@ -814,10 +846,9 @@ app.get('/api/insight/today', authenticate, async (req, res) => {
       .sort({ weekKey: -1 })
       .limit(6);
 
-    const orderedWeeks = weeklySnapshots.reverse(); // oldest -> newest
+    const orderedWeeks = weeklySnapshots.reverse();
     const chartPoints = orderedWeeks.map(w => w.expenses);
 
-    // Real trend direction from real numbers — not left to the model to guess.
     let trendDirection = 'flat';
     if (chartPoints.length >= 2) {
       const first = chartPoints[0];
@@ -851,72 +882,32 @@ Output must be ONLY valid JSON with these exact keys, no other text:
 }
 `.trim();
 
-    const apiKey = process.env.GEMINI_API_KEY;
-    if (!apiKey) {
-      return res.status(500).json({ error: 'Server configuration error: missing GEMINI_API_KEY' });
-    }
-
-    const models = [
-      'gemini-2.5-flash',
-      'gemini-2.5-flash-lite',
-      'gemini-3-flash-preview',
-    ];
-
-    let lastError = null;
-    for (const model of models) {
-      try {
-        console.log(`🔍 Trying Gemini for today's insight with model: ${model}`);
-        const response = await fetch(
-          `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`,
-          {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              contents: [{ role: 'user', parts: [{ text: prompt }] }]
-            })
-          }
-        );
-
-        const data = await response.json();
-        if (!response.ok) {
-          throw new Error(data.error?.message || `Gemini returned status ${response.status}`);
-        }
-
-        const rawText = data.candidates?.[0]?.content?.parts?.[0]?.text;
-        if (!rawText) throw new Error('No content returned from Gemini');
-
-        const jsonStr = rawText.replace(/```json|```/g, '').trim();
-        const parsed = JSON.parse(jsonStr);
-
-        if (!parsed.title || !parsed.body) {
-          throw new Error('Incomplete data from Gemini');
-        }
-
-        console.log(`✅ Today's insight generated with model: ${model}`);
-        return res.json({
-          title: parsed.title,
-          body: parsed.body,
-          chartPoints: chartPoints.length ? chartPoints : null,
-          trendDirection,
-          action: parsed.action || null,
-        });
-
-      } catch (err) {
-        console.warn(`⚠️ Model ${model} failed: ${err.message}`);
-        lastError = err;
+    let parsed;
+    try {
+      const { text } = await callAI(prompt);
+      parsed = JSON.parse(stripJsonFence(text));
+      if (!parsed.title || !parsed.body) {
+        throw new Error('Incomplete data from AI provider');
       }
+    } catch (err) {
+      console.error("❌ All AI providers failed for today's insight:", err.message);
+      return res.status(502).json({ error: err.message || 'Unable to generate insight. Please try again later.' });
     }
 
-    console.error("❌ All Gemini models failed for today's insight");
-    throw lastError || new Error('Unable to generate insight. Please try again later.');
-
+    res.json({
+      title: parsed.title,
+      body: parsed.body,
+      chartPoints: chartPoints.length ? chartPoints : null,
+      trendDirection,
+      action: parsed.action || null,
+    });
   } catch (err) {
     console.error('TODAY INSIGHT ERROR:', err);
     res.status(500).json({ error: err.message || 'Internal server error' });
   }
 });
 
-// ─── AI Coach Chat (Gemini reply + real weekly chart data from MongoDB) ───
+// ─── AI Coach Chat (Groq → Gemini + real weekly chart data from MongoDB) ───
 app.post('/api/chat', authenticate, async (req, res) => {
   try {
     const { messages } = req.body;
@@ -924,7 +915,6 @@ app.post('/api/chat', authenticate, async (req, res) => {
       return res.status(400).json({ error: 'messages must be a non-empty array' });
     }
 
-    // ─── Fetch real user data from DB ─────────────────
     const profile = await Profile.findOne({ userId: req.userId });
     const goals = await Goal.find({ userId: req.userId });
 
@@ -935,7 +925,6 @@ app.post('/api/chat', authenticate, async (req, res) => {
     const monthlyIncome = (profile?.primarySalary || 0) + (profile?.sideIncome || 0);
     const monthlyExpenses = (profile?.rent || 0) + (profile?.food || 0) + (profile?.transport || 0) + (profile?.entertainment || 0) + (profile?.monthlyEMI || 0);
 
-    // ─── Ensure this week's snapshot exists, then pull the last 7 weeks ───
     const now = new Date();
     const currentWeekKey = getIsoWeekKey(now);
     await WeeklySnapshot.findOneAndUpdate(
@@ -949,10 +938,8 @@ app.post('/api/chat', authenticate, async (req, res) => {
       .sort({ weekKey: -1 })
       .limit(7);
 
-    const orderedWeeks = weeklySnapshots.reverse(); // oldest -> newest
+    const orderedWeeks = weeklySnapshots.reverse();
     const chartData = orderedWeeks.map(w => w.expenses);
-    // Highlight the most recent 2 bars (roughly "this week"), matching the
-    // teal-vs-gray split in the existing bar chart visual.
     const highlightFromIndex = Math.max(0, chartData.length - 2);
 
     const systemPrompt = `
@@ -975,61 +962,26 @@ Answer the user's question concisely and helpfully. You may reference the weekly
     const userMessages = messages.map(m => m.content || '').join('\n');
     const fullPrompt = systemPrompt + '\n\n' + userMessages;
 
-    const apiKey = process.env.GEMINI_API_KEY;
-    if (!apiKey) {
-      console.error('❌ Missing GEMINI_API_KEY');
-      return res.status(500).json({ error: 'Server configuration error: missing API key' });
-    }
-
-    const models = [
-      'gemini-2.5-flash',
-      'gemini-2.5-flash-lite',
-      'gemini-3-flash-preview',
+    // Structured chat messages for providers that support role-based turns (Groq)
+    const structuredMessages = [
+      { role: 'system', content: systemPrompt },
+      ...messages.map(m => ({ role: m.role === 'assistant' ? 'assistant' : 'user', content: m.content || '' })),
     ];
 
-    let lastError = null;
-    for (const model of models) {
-      try {
-        console.log(`🔄 Trying Gemini model: ${model}`);
-        const response = await fetch(
-          `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`,
-          {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              contents: [{ role: 'user', parts: [{ text: fullPrompt }] }]
-            })
-          }
-        );
-
-        const data = await response.json();
-        if (!response.ok) {
-          const errorMsg = data.error?.message || `status ${response.status}`;
-          console.warn(`⚠️ Model ${model} failed: ${errorMsg}`);
-          lastError = new Error(errorMsg);
-          continue;
-        }
-
-        const reply = data.candidates?.[0]?.content?.parts?.[0]?.text
-                      ?? 'I could not generate a response. Please try again.';
-
-        console.log(`✅ Success with model: ${model}`);
-
-        return res.json({
-          reply,
-          chartData: chartData.length ? chartData : null,
-          highlightFromIndex,
-        });
-
-      } catch (fetchErr) {
-        console.warn(`⚠️ Network error with model ${model}: ${fetchErr.message}`);
-        lastError = fetchErr;
-      }
+    let reply;
+    try {
+      const result = await callAI(fullPrompt, structuredMessages);
+      reply = result.text;
+    } catch (err) {
+      console.error('❌ All AI providers failed for chat:', err.message);
+      return res.status(502).json({ error: err.message || 'All AI providers are currently unavailable.' });
     }
 
-    console.error('❌ All Gemini models failed');
-    throw lastError || new Error('All Gemini models are currently unavailable.');
-
+    res.json({
+      reply,
+      chartData: chartData.length ? chartData : null,
+      highlightFromIndex,
+    });
   } catch (err) {
     console.error('CHAT ERROR:', err);
     res.status(500).json({ error: err.message || 'Server error. Please try again later.' });
