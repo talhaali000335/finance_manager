@@ -705,6 +705,131 @@ app.get('/', (req, res) => {
   });
 });
 
+// ─── TODAY'S INSIGHT – AI-powered (Gemini) + real chart data ───
+app.get('/api/insight/today', authenticate, async (req, res) => {
+  try {
+    const profile = await Profile.findOne({ userId: req.userId });
+    const goals = await Goal.find({ userId: req.userId });
+
+    const monthlyIncome = (profile?.primarySalary || 0) + (profile?.sideIncome || 0);
+    const monthlyExpenses = (profile?.rent || 0) + (profile?.food || 0) + (profile?.transport || 0) + (profile?.entertainment || 0) + (profile?.monthlyEMI || 0);
+
+    // ─── Ensure this week's snapshot exists, then pull last 6 weeks ───
+    const now = new Date();
+    const currentWeekKey = getIsoWeekKey(now);
+    await WeeklySnapshot.findOneAndUpdate(
+      { userId: req.userId, weekKey: currentWeekKey },
+      { $setOnInsert: { income: Math.round(monthlyIncome / 4), expenses: Math.round(monthlyExpenses / 4) } },
+      { upsert: true, new: true }
+    );
+
+    const weeklySnapshots = await WeeklySnapshot
+      .find({ userId: req.userId })
+      .sort({ weekKey: -1 })
+      .limit(6);
+
+    const orderedWeeks = weeklySnapshots.reverse(); // oldest -> newest
+    const chartPoints = orderedWeeks.map(w => w.expenses);
+
+    // Real trend direction from real numbers — not left to the model to guess.
+    let trendDirection = 'flat';
+    if (chartPoints.length >= 2) {
+      const first = chartPoints[0];
+      const last = chartPoints[chartPoints.length - 1];
+      if (last > first) trendDirection = 'up';
+      else if (last < first) trendDirection = 'down';
+    }
+
+    const primaryGoal = goals.sort((a, b) => (b.priority || 0) - (a.priority || 0))[0];
+
+    const prompt = `
+You are a friendly personal finance coach. Based on the real data below, write today's insight for the user.
+Never invent numbers — only reference the ones given.
+
+USER DATA:
+- Monthly income: $${monthlyIncome}
+- Monthly expenses: $${monthlyExpenses}
+- Weekly expense trend (oldest to newest, last ${chartPoints.length} weeks): ${JSON.stringify(chartPoints)}
+- Trend direction: ${trendDirection}
+- Primary goal: ${primaryGoal ? `${primaryGoal.name || primaryGoal.goalType}, target $${primaryGoal.targetAmount} by ${new Date(primaryGoal.targetDate).toDateString()}` : 'none set'}
+
+Output must be ONLY valid JSON with these exact keys, no other text:
+{
+  "title": "short punchy insight title, e.g. 'Great Progress!' or 'Watch Your Spending'",
+  "body": "2-3 sentence explanation grounded in the real numbers above",
+  "action": {
+    "title": "short action card title, e.g. 'Build a Money Habit'",
+    "description": "1-2 sentence actionable suggestion tied to the data",
+    "buttonLabel": "short button text, e.g. 'Start Now'"
+  }
+}
+`.trim();
+
+    const apiKey = process.env.GEMINI_API_KEY;
+    if (!apiKey) {
+      return res.status(500).json({ error: 'Server configuration error: missing GEMINI_API_KEY' });
+    }
+
+    const models = [
+      'gemini-2.5-flash',
+      'gemini-2.5-flash-lite',
+      'gemini-3-flash-preview',
+    ];
+
+    let lastError = null;
+    for (const model of models) {
+      try {
+        console.log(`🔍 Trying Gemini for today's insight with model: ${model}`);
+        const response = await fetch(
+          `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`,
+          {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              contents: [{ role: 'user', parts: [{ text: prompt }] }]
+            })
+          }
+        );
+
+        const data = await response.json();
+        if (!response.ok) {
+          throw new Error(data.error?.message || `Gemini returned status ${response.status}`);
+        }
+
+        const rawText = data.candidates?.[0]?.content?.parts?.[0]?.text;
+        if (!rawText) throw new Error('No content returned from Gemini');
+
+        const jsonStr = rawText.replace(/```json|```/g, '').trim();
+        const parsed = JSON.parse(jsonStr);
+
+        if (!parsed.title || !parsed.body) {
+          throw new Error('Incomplete data from Gemini');
+        }
+
+        console.log(`✅ Today's insight generated with model: ${model}`);
+        return res.json({
+          title: parsed.title,
+          body: parsed.body,
+          chartPoints: chartPoints.length ? chartPoints : null,
+          trendDirection,
+          action: parsed.action || null,
+        });
+
+      } catch (err) {
+        console.warn(`⚠️ Model ${model} failed: ${err.message}`);
+        lastError = err;
+      }
+    }
+
+    console.error("❌ All Gemini models failed for today's insight");
+    throw lastError || new Error('Unable to generate insight. Please try again later.');
+
+  } catch (err) {
+    console.error('TODAY INSIGHT ERROR:', err);
+    res.status(500).json({ error: err.message || 'Internal server error' });
+  }
+});
+
 // ─── AI Coach Chat (Gemini reply + real weekly chart data from MongoDB) ───
 app.post('/api/chat', authenticate, async (req, res) => {
   try {
