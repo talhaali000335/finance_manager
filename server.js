@@ -363,6 +363,92 @@ app.put('/api/profile/:userId', authenticate, authorizeProfileAccess, async (req
   }
 });
 
+// ─── FINANCIAL FLOW INSIGHT (Gemini) ──────────────
+app.get('/api/financial-insight', authenticate, async (req, res) => {
+  try {
+    const profile = await Profile.findOne({ userId: req.userId });
+    const goals = await Goal.find({ userId: req.userId });
+
+    if (!profile) return res.status(404).json({ error: 'Profile not found' });
+
+    const income = (profile.primarySalary || 0) + (profile.sideIncome || 0);
+    const expenses = (profile.rent || 0) + (profile.food || 0) + (profile.transport || 0) + (profile.entertainment || 0) + (profile.monthlyEMI || 0);
+
+    const primaryGoal = goals.sort((a, b) => (b.priority || 0) - (a.priority || 0))[0];
+
+    const prompt = `
+You are a compassionate financial coach. Based on the user's real data, write a short, uplifting "intentions" summary (2-3 sentences) that highlights what they're doing well and offers a gentle nudge. Use the data to be specific. Output ONLY a JSON object with this exact structure:
+{
+  "title": "short, one-line title like 'Balanced & Intentional'",
+  "summary": "the 2-3 sentence summary",
+  "focusAreas": [
+    {"label": "Pause", "color": "yellow", "percent": number between 0-100},
+    {"label": "Nourish", "color": "blue", "percent": number},
+    {"label": "Sustain", "color": "purple", "percent": number}
+  ]
+}
+The focusAreas represent how the user's budget breaks down (e.g., Pause = discretionary, Nourish = essentials, Sustain = savings). Percentages should add up to 100.
+Never invent numbers – use the real data.
+`.trim();
+
+    const apiKey = process.env.GEMINI_API_KEY;
+    if (!apiKey) return res.status(500).json({ error: 'Server configuration error: missing GEMINI_API_KEY' });
+
+    const models = [
+      'gemini-2.5-flash',
+      'gemini-2.5-flash-lite',
+      'gemini-3-flash-preview',
+    ];
+
+    let lastError = null;
+    for (const model of models) {
+      try {
+        console.log(`🔍 Trying Gemini for financial insight with model: ${model}`);
+        const response = await fetch(
+          `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`,
+          {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              contents: [{ role: 'user', parts: [{ text: prompt }] }]
+            })
+          }
+        );
+
+        const data = await response.json();
+        if (!response.ok) {
+          throw new Error(data.error?.message || `Gemini returned status ${response.status}`);
+        }
+
+        const rawText = data.candidates?.[0]?.content?.parts?.[0]?.text;
+        if (!rawText) throw new Error('No content returned from Gemini');
+
+        const jsonStr = rawText.replace(/```json|```/g, '').trim();
+        const analysis = JSON.parse(jsonStr);
+
+        if (!analysis.title || !analysis.summary || !analysis.focusAreas) {
+          throw new Error('Incomplete data from Gemini');
+        }
+
+        console.log(`✅ Financial insight generated with model: ${model}`);
+        return res.json(analysis);
+
+      } catch (err) {
+        console.warn(`⚠️ Model ${model} failed: ${err.message}`);
+        lastError = err;
+      }
+    }
+
+    console.error('❌ All Gemini models failed for financial insight');
+    throw lastError || new Error('Unable to generate financial insight. Please try again later.');
+
+  } catch (err) {
+    console.error('FINANCIAL INSIGHT ERROR:', err);
+    res.status(500).json({ error: err.message || 'Internal server error' });
+  }
+});
+
+
 // ─── ACTION PLAN ENDPOINT ────────────────────────────
 app.get('/api/action-plan', authenticate, async (req, res) => {
   try {
