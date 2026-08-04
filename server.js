@@ -1067,7 +1067,80 @@ Generate exactly 3 highlights. Use the actual data – never invent numbers.
   }
 });
 
+// ─── SPENDING ANALYSIS – AI-powered (Groq → Gemini, JSON-mode enforced) ───
+app.get('/api/spending-analysis', authenticate, async (req, res) => {
+  try {
+    const profile = await Profile.findOne({ userId: req.userId });
+    if (!profile) return res.status(404).json({ error: 'Profile not found' });
 
+    const rent = profile.rent || 0;
+    const food = profile.food || 0;
+    const transport = profile.transport || 0;
+    const entertainment = profile.entertainment || 0;
+    const emi = profile.monthlyEMI || 0;
+    const income = (profile.primarySalary || 0) + (profile.sideIncome || 0);
+    const savingsAmount = Math.max(income - (rent + food + transport + entertainment + emi), 0);
+
+    const total = rent + food + transport + entertainment + emi + savingsAmount;
+
+    const breakdown = [
+      { label: 'Housing', amount: rent },
+      { label: 'Savings', amount: savingsAmount },
+      { label: 'Food', amount: food },
+      { label: 'Other', amount: entertainment + emi },
+      { label: 'Transport', amount: transport },
+    ].map(item => ({
+      ...item,
+      percent: total > 0 ? Math.round((item.amount / total) * 100) : 0,
+    }));
+
+    const prompt = `
+You are a sharp, encouraging financial behavior analyst. Based on the user's real spending breakdown below, identify their spending behavior patterns and give recommendations.
+Never invent numbers – use only the real data provided.
+
+USER SPENDING BREAKDOWN (percent of total):
+${breakdown.map(b => `- ${b.label}: $${b.amount} (${b.percent}%)`).join('\n')}
+Monthly income: $${income}
+
+Output ONLY a JSON object with this exact structure, no extra commentary:
+{
+  "patterns": [
+    {"icon": "monetization_on", "title": "short pattern title", "description": "1-2 sentence description grounded in the real data"},
+    {"icon": "speed", "title": "short pattern title", "description": "1-2 sentence description"},
+    {"icon": "people", "title": "short pattern title", "description": "1-2 sentence description"}
+  ],
+  "recommendations": [
+    "short actionable move 1",
+    "short actionable move 2",
+    "short actionable move 3"
+  ]
+}
+Generate exactly 3 patterns and exactly 3 recommendations, each grounded in the real breakdown above.
+`.trim();
+
+    let analysis;
+    try {
+      const { text } = await callAI(prompt, null, true);
+      analysis = extractJson(text);
+      if (!analysis.patterns || !analysis.recommendations) {
+        throw new Error('Incomplete data from AI provider');
+      }
+    } catch (err) {
+      console.error('❌ All AI providers failed for spending analysis:', err.message);
+      return res.status(502).json({ error: err.message || 'Unable to generate spending analysis. Please try again later.' });
+    }
+
+    res.json({
+      breakdown,
+      spentTotal: total,
+      patterns: analysis.patterns,
+      recommendations: analysis.recommendations,
+    });
+  } catch (err) {
+    console.error('SPENDING ANALYSIS ERROR:', err);
+    res.status(500).json({ error: err.message || 'Internal server error' });
+  }
+});
 
 
 
