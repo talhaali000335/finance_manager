@@ -91,7 +91,7 @@ const LinkedAccount = mongoose.model('LinkedAccount', linkedAccountSchema);
 // ─── Monthly Snapshot Model ──────────────────────
 const monthlySnapshotSchema = new mongoose.Schema({
   userId:    { type: String, required: true },
-  monthKey:  { type: String, required: true },
+  monthKey:  { type: String, required: true },   // e.g. "2026-07"
   income:    { type: Number, default: 0 },
   expenses:  { type: Number, default: 0 },
 }, { timestamps: true });
@@ -99,6 +99,29 @@ const monthlySnapshotSchema = new mongoose.Schema({
 monthlySnapshotSchema.index({ userId: 1, monthKey: 1 }, { unique: true });
 
 const MonthlySnapshot = mongoose.model('MonthlySnapshot', monthlySnapshotSchema);
+
+// ─── Weekly Snapshot Model (NEW – powers real chart bars) ───
+// ISO week key, e.g. "2026-W31", so weeks are unambiguous across years.
+const weeklySnapshotSchema = new mongoose.Schema({
+  userId:    { type: String, required: true },
+  weekKey:   { type: String, required: true },   // e.g. "2026-W31"
+  income:    { type: Number, default: 0 },
+  expenses:  { type: Number, default: 0 },
+}, { timestamps: true });
+
+weeklySnapshotSchema.index({ userId: 1, weekKey: 1 }, { unique: true });
+
+const WeeklySnapshot = mongoose.model('WeeklySnapshot', weeklySnapshotSchema);
+
+// Helper: ISO 8601 week key for "this week" bucketing
+function getIsoWeekKey(date = new Date()) {
+  const d = new Date(Date.UTC(date.getFullYear(), date.getMonth(), date.getDate()));
+  const dayNum = d.getUTCDay() || 7;
+  d.setUTCDate(d.getUTCDate() + 4 - dayNum);
+  const yearStart = new Date(Date.UTC(d.getUTCFullYear(), 0, 1));
+  const weekNo = Math.ceil((((d - yearStart) / 86400000) + 1) / 7);
+  return `${d.getUTCFullYear()}-W${String(weekNo).padStart(2, '0')}`;
+}
 
 // ─── Profile Model ─────────────────────────────────
 const profileSchema = new mongoose.Schema({
@@ -183,8 +206,6 @@ const authenticate = async (req, res, next) => {
 };
 
 // ─── AUTH ROUTES ────────────────────────────────────
-
-// ✅ Signup – now creates a blank profile
 app.post('/api/auth/signup', async (req, res) => {
   try {
     const { name, email, password } = req.body;
@@ -196,10 +217,6 @@ app.post('/api/auth/signup', async (req, res) => {
 
     const user = new User({ name, email, password });
     await user.save();
-
-    // ✅ Auto-create profile for the new user
-    await Profile.create({ userId: user._id });
-
     const token = generateToken(user._id);
     res.status(201).json({
       message: 'User created successfully.',
@@ -212,7 +229,6 @@ app.post('/api/auth/signup', async (req, res) => {
   }
 });
 
-// ✅ Login – ensures profile exists
 app.post('/api/auth/login', async (req, res) => {
   try {
     const { email, password } = req.body;
@@ -224,13 +240,6 @@ app.post('/api/auth/login', async (req, res) => {
 
     const isMatch = await user.comparePassword(password);
     if (!isMatch) return res.status(401).json({ error: 'Invalid email or password.' });
-
-    // ✅ Upsert profile – creates if missing, does nothing if already exists
-    await Profile.findOneAndUpdate(
-      { userId: user._id },
-      { $setOnInsert: { userId: user._id } },
-      { upsert: true, new: true }
-    );
 
     const token = generateToken(user._id);
     res.json({
@@ -354,7 +363,7 @@ app.put('/api/profile/:userId', authenticate, authorizeProfileAccess, async (req
   }
 });
 
-// ─── ACTION PLAN ENDPOINT ───────────────────────────
+// ─── ACTION PLAN ENDPOINT ────────────────────────────
 app.get('/api/action-plan', authenticate, async (req, res) => {
   try {
     const profile = await Profile.findOne({ userId: req.userId });
@@ -442,25 +451,154 @@ app.post('/api/action-plan/task-done', authenticate, async (req, res) => {
   }
 });
 
-// ─── TAX ANALYSIS ──────────────────────────────────
+// ─── TAX ANALYSIS – AI-powered (Gemini) ─────────────
 app.get('/api/tax-analysis', authenticate, async (req, res) => {
-  // … unchanged …
+  try {
+    const profile = await Profile.findOne({ userId: req.userId });
+    if (!profile) return res.status(404).json({ error: 'Profile not found' });
+
+    const income = (profile.primarySalary || 0) + (profile.sideIncome || 0);
+    const state = profile.state || 'NY';
+    const filingStatus = profile.filingStatus || 'Single';
+    const currentDate = new Date().toISOString().split('T')[0];
+
+    const prompt = `
+You are a tax advisor. Based on the following user data, provide a tax analysis in JSON format.
+User data:
+- Annual income: $${income}
+- State: ${state}
+- Filing status: ${filingStatus}
+- Current date: ${currentDate}
+
+Output must be a valid JSON object with these exact keys:
+{
+  "annualTax": number (estimated total federal + state + FICA + local),
+  "effectiveRate": number (as percentage),
+  "marginalRate": number (as percentage),
+  "breakdown": {
+    "federal": number,
+    "state": number,
+    "fica": number,
+    "local": number
+  },
+  "tips": [
+    {"icon": "account_balance", "title": "string", "description": "string"},
+    {"icon": "health_and_safety", "title": "string", "description": "string"}
+  ]
+}
+Return ONLY the JSON, no additional text.
+`.trim();
+
+    const apiKey = process.env.GEMINI_API_KEY;
+    if (!apiKey) {
+      return res.status(500).json({ error: 'Server configuration error: missing GEMINI_API_KEY' });
+    }
+
+    const models = [
+      'gemini-2.5-flash',
+      'gemini-2.5-flash-lite',
+      'gemini-3-flash-preview',
+    ];
+
+    let lastError = null;
+    for (const model of models) {
+      try {
+        console.log(`🔍 Trying Gemini for tax analysis with model: ${model}`);
+        const response = await fetch(
+          `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`,
+          {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              contents: [{ role: 'user', parts: [{ text: prompt }] }]
+            })
+          }
+        );
+
+        const data = await response.json();
+        if (!response.ok) {
+          throw new Error(data.error?.message || `Gemini returned status ${response.status}`);
+        }
+
+        const rawText = data.candidates?.[0]?.content?.parts?.[0]?.text;
+        if (!rawText) throw new Error('No content returned from Gemini');
+
+        const jsonStr = rawText.replace(/```json|```/g, '').trim();
+        const analysis = JSON.parse(jsonStr);
+
+        if (analysis.annualTax == null || analysis.effectiveRate == null) {
+          throw new Error('Incomplete data from Gemini');
+        }
+
+        console.log(`✅ Tax analysis generated with model: ${model}`);
+        return res.json(analysis);
+
+      } catch (err) {
+        console.warn(`⚠️ Model ${model} failed: ${err.message}`);
+        lastError = err;
+      }
+    }
+
+    console.error('❌ All Gemini models failed for tax analysis');
+    throw lastError || new Error('Unable to generate tax analysis. Please try again later.');
+
+  } catch (err) {
+    console.error('TAX ANALYSIS ERROR:', err);
+    res.status(500).json({ error: err.message || 'Internal server error' });
+  }
 });
 
-// ─── SUBSCRIPTION ROUTES ────────────────────────────
+// ─── GET current subscription ──────────────────────
 app.get('/api/subscription', authenticate, async (req, res) => {
-  // … unchanged …
+  try {
+    const sub = await Subscription.findOne({ userId: req.userId });
+    res.json(sub || { plan: 'none', active: false });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
 });
 
 app.post('/api/subscription', authenticate, async (req, res) => {
-  // … unchanged …
+  try {
+    const { plan } = req.body;
+    if (!['monthly', 'yearly'].includes(plan)) {
+      return res.status(400).json({ error: 'Invalid plan' });
+    }
+
+    const startDate = new Date();
+    const endDate = new Date();
+    if (plan === 'yearly') {
+      endDate.setFullYear(endDate.getFullYear() + 1);
+    } else {
+      endDate.setMonth(endDate.getMonth() + 1);
+    }
+
+    const sub = await Subscription.findOneAndUpdate(
+      { userId: req.userId },
+      { plan, active: true, startDate, endDate, cancelAtPeriodEnd: false },
+      { new: true, upsert: true }
+    );
+    res.json(sub);
+  } catch (err) {
+    res.status(400).json({ error: err.message });
+  }
 });
 
 app.delete('/api/subscription', authenticate, async (req, res) => {
-  // … unchanged …
+  try {
+    const sub = await Subscription.findOne({ userId: req.userId });
+    if (!sub) return res.status(404).json({ error: 'No subscription found' });
+
+    sub.cancelAtPeriodEnd = true;
+    await sub.save();
+
+    res.json({ message: 'Subscription will be cancelled at the end of the current period.' });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
 });
 
-// ✅ CASH FLOW ENDPOINT – auto‑creates profile if missing
+// ─── CASH FLOW ENDPOINT (also seeds WeeklySnapshot) ──
 app.get('/api/cash-flow', authenticate, async (req, res) => {
   try {
     let profile = await Profile.findOne({ userId: req.userId });
@@ -477,6 +615,14 @@ app.get('/api/cash-flow', authenticate, async (req, res) => {
     await MonthlySnapshot.findOneAndUpdate(
       { userId: req.userId, monthKey: currentMonthKey },
       { $setOnInsert: { income, expenses } },
+      { upsert: true, new: true }
+    );
+
+    // Also seed this week's snapshot so weekly bars have real data
+    const currentWeekKey = getIsoWeekKey(now);
+    await WeeklySnapshot.findOneAndUpdate(
+      { userId: req.userId, weekKey: currentWeekKey },
+      { $setOnInsert: { income: Math.round(income / 4), expenses: Math.round(expenses / 4) } },
       { upsert: true, new: true }
     );
 
@@ -559,9 +705,124 @@ app.get('/', (req, res) => {
   });
 });
 
-// ─── Chat route (unchanged) ─────────────────────────
+// ─── AI Coach Chat (Gemini reply + real weekly chart data from MongoDB) ───
 app.post('/api/chat', authenticate, async (req, res) => {
-  // … unchanged …
+  try {
+    const { messages } = req.body;
+    if (!Array.isArray(messages) || messages.length === 0) {
+      return res.status(400).json({ error: 'messages must be a non-empty array' });
+    }
+
+    // ─── Fetch real user data from DB ─────────────────
+    const profile = await Profile.findOne({ userId: req.userId });
+    const goals = await Goal.find({ userId: req.userId });
+
+    const assets = (profile?.cashSavings || 0) + (profile?.investments || 0) + (profile?.propertyValue || 0);
+    const liabilities = (profile?.totalLoans || 0) + (profile?.creditCardDebt || 0) + (profile?.monthlyEMI || 0);
+    const netWorth = assets - liabilities;
+
+    const monthlyIncome = (profile?.primarySalary || 0) + (profile?.sideIncome || 0);
+    const monthlyExpenses = (profile?.rent || 0) + (profile?.food || 0) + (profile?.transport || 0) + (profile?.entertainment || 0) + (profile?.monthlyEMI || 0);
+
+    // ─── Ensure this week's snapshot exists, then pull the last 7 weeks ───
+    const now = new Date();
+    const currentWeekKey = getIsoWeekKey(now);
+    await WeeklySnapshot.findOneAndUpdate(
+      { userId: req.userId, weekKey: currentWeekKey },
+      { $setOnInsert: { income: Math.round(monthlyIncome / 4), expenses: Math.round(monthlyExpenses / 4) } },
+      { upsert: true, new: true }
+    );
+
+    const weeklySnapshots = await WeeklySnapshot
+      .find({ userId: req.userId })
+      .sort({ weekKey: -1 })
+      .limit(7);
+
+    const orderedWeeks = weeklySnapshots.reverse(); // oldest -> newest
+    const chartData = orderedWeeks.map(w => w.expenses);
+    // Highlight the most recent 2 bars (roughly "this week"), matching the
+    // teal-vs-gray split in the existing bar chart visual.
+    const highlightFromIndex = Math.max(0, chartData.length - 2);
+
+    const systemPrompt = `
+You are a helpful, personal financial advisor.
+Use the following real user data to give precise, actionable advice.
+Never make up numbers – refer to the data provided.
+
+USER PROFILE:
+- Net worth: $${netWorth}
+- Monthly income: $${monthlyIncome}
+- Monthly expenses: $${monthlyExpenses}
+- Goals: ${JSON.stringify(goals.map(g => ({ name: g.name || g.goalType, target: g.targetAmount, date: g.targetDate })))}
+- Assets breakdown: Cash & Savings: $${profile?.cashSavings || 0}, Investments: $${profile?.investments || 0}, Property: $${profile?.propertyValue || 0}
+- Liabilities: Loans: $${profile?.totalLoans || 0}, Credit Card Debt: $${profile?.creditCardDebt || 0}, Monthly EMI: $${profile?.monthlyEMI || 0}
+- Last ${orderedWeeks.length} weeks of expenses: ${JSON.stringify(orderedWeeks.map(w => ({ week: w.weekKey, expenses: w.expenses })))}
+
+Answer the user's question concisely and helpfully. You may reference the weekly expense trend above in your reply if relevant, but do not invent numbers not given to you.
+`.trim();
+
+    const userMessages = messages.map(m => m.content || '').join('\n');
+    const fullPrompt = systemPrompt + '\n\n' + userMessages;
+
+    const apiKey = process.env.GEMINI_API_KEY;
+    if (!apiKey) {
+      console.error('❌ Missing GEMINI_API_KEY');
+      return res.status(500).json({ error: 'Server configuration error: missing API key' });
+    }
+
+    const models = [
+      'gemini-2.5-flash',
+      'gemini-2.5-flash-lite',
+      'gemini-3-flash-preview',
+    ];
+
+    let lastError = null;
+    for (const model of models) {
+      try {
+        console.log(`🔄 Trying Gemini model: ${model}`);
+        const response = await fetch(
+          `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`,
+          {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              contents: [{ role: 'user', parts: [{ text: fullPrompt }] }]
+            })
+          }
+        );
+
+        const data = await response.json();
+        if (!response.ok) {
+          const errorMsg = data.error?.message || `status ${response.status}`;
+          console.warn(`⚠️ Model ${model} failed: ${errorMsg}`);
+          lastError = new Error(errorMsg);
+          continue;
+        }
+
+        const reply = data.candidates?.[0]?.content?.parts?.[0]?.text
+                      ?? 'I could not generate a response. Please try again.';
+
+        console.log(`✅ Success with model: ${model}`);
+
+        return res.json({
+          reply,
+          chartData: chartData.length ? chartData : null,
+          highlightFromIndex,
+        });
+
+      } catch (fetchErr) {
+        console.warn(`⚠️ Network error with model ${model}: ${fetchErr.message}`);
+        lastError = fetchErr;
+      }
+    }
+
+    console.error('❌ All Gemini models failed');
+    throw lastError || new Error('All Gemini models are currently unavailable.');
+
+  } catch (err) {
+    console.error('CHAT ERROR:', err);
+    res.status(500).json({ error: err.message || 'Server error. Please try again later.' });
+  }
 });
 
 // ─── Export for Vercel ──────────────────────────────
