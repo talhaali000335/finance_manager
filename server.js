@@ -15,7 +15,6 @@ const MONGODB_URI = process.env.MONGODB_URI || 'mongodb://localhost:27017/finpat
 const JWT_SECRET = process.env.JWT_SECRET || 'your-secret-key-change-in-production';
 const JWT_EXPIRES_IN = process.env.JWT_EXPIRES_IN || '7d';
 
-// ─── Log a safe version of the URI ──────────────────
 if (process.env.MONGODB_URI) {
   const redacted = MONGODB_URI.replace(/:\/\/([^:]+):([^@]+)@/, '://$1:****@');
   console.log('🔎 Using MONGODB_URI:', redacted);
@@ -23,7 +22,6 @@ if (process.env.MONGODB_URI) {
   console.warn('⚠️  MONGODB_URI env var is NOT set – falling back to localhost');
 }
 
-// ─── MongoDB connection (cached across invocations) ──
 let cachedConnection = null;
 
 async function connectDB() {
@@ -48,7 +46,6 @@ async function connectDB() {
   }
 }
 
-// Gate every request on a live connection
 app.use(async (req, res, next) => {
   try {
     await connectDB();
@@ -204,9 +201,6 @@ const authenticate = async (req, res, next) => {
 };
 
 // ─── AI PROVIDER HELPER (Groq primary → Gemini fallback) ───
-// Centralizes the multi-provider chat-completion call so every AI-backed
-// route (chat, financial-insight, tax-analysis, insight/today) shares the
-// exact same fallback chain instead of duplicating it four times.
 const GROQ_KEY = process.env.GROQ_API_KEY;
 const GEMINI_KEY = process.env.GEMINI_API_KEY;
 
@@ -229,14 +223,11 @@ function buildProviderChain() {
 }
 
 /**
- * Runs a prompt through the provider chain and returns the first successful
- * raw text reply. Throws the last error if every provider fails.
- * @param {string} prompt - full prompt text (used for Gemini and as fallback for Groq)
- * @param {Array<{role:string, content:string}>} [chatMessages] - optional structured
- *        messages for providers that support role-based chat (Groq). If omitted,
- *        the raw prompt is sent as a single user message.
+ * Calls the provider chain. Pass wantsJson=true for routes that need a
+ * strict JSON object back — this forces JSON mode on both Groq and Gemini
+ * so the model can't prepend prose like "Since there's no data yet...".
  */
-async function callAI(prompt, chatMessages = null) {
+async function callAI(prompt, chatMessages = null, wantsJson = false) {
   const providers = buildProviderChain();
   if (providers.length === 0) {
     throw new Error('Server configuration error: no AI provider keys set (GROQ_API_KEY or GEMINI_API_KEY)');
@@ -264,6 +255,7 @@ async function callAI(prompt, chatMessages = null) {
             model: provider.model,
             messages,
             temperature: 0.7,
+            ...(wantsJson ? { response_format: { type: 'json_object' } } : {}),
           }),
         });
 
@@ -282,6 +274,7 @@ async function callAI(prompt, chatMessages = null) {
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
               contents: [{ role: 'user', parts: [{ text: prompt }] }],
+              ...(wantsJson ? { generationConfig: { responseMimeType: 'application/json' } } : {}),
             }),
           }
         );
@@ -309,8 +302,20 @@ async function callAI(prompt, chatMessages = null) {
   throw lastError || new Error('All AI providers are currently unavailable.');
 }
 
-function stripJsonFence(text) {
-  return text.replace(/```json|```/g, '').trim();
+// Extracts the first {...} JSON object from a string, even if the model
+// added prose before/after it (safety net on top of JSON mode above).
+function extractJson(text) {
+  const cleaned = text.replace(/```json|```/g, '').trim();
+  try {
+    return JSON.parse(cleaned);
+  } catch (_) {
+    const start = cleaned.indexOf('{');
+    const end = cleaned.lastIndexOf('}');
+    if (start !== -1 && end !== -1 && end > start) {
+      return JSON.parse(cleaned.slice(start, end + 1));
+    }
+    throw new Error('No valid JSON found in AI response');
+  }
 }
 
 // ─── AUTH ROUTES ────────────────────────────────────
@@ -471,7 +476,7 @@ app.put('/api/profile/:userId', authenticate, authorizeProfileAccess, async (req
   }
 });
 
-// ─── FINANCIAL FLOW INSIGHT (Groq → Gemini) ──────────────
+// ─── FINANCIAL FLOW INSIGHT (Groq → Gemini, JSON-mode enforced) ──────────────
 app.get('/api/financial-insight', authenticate, async (req, res) => {
   try {
     const profile = await Profile.findOne({ userId: req.userId });
@@ -485,7 +490,7 @@ app.get('/api/financial-insight', authenticate, async (req, res) => {
     const primaryGoal = goals.sort((a, b) => (b.priority || 0) - (a.priority || 0))[0];
 
     const prompt = `
-You are a compassionate financial coach. Based on the user's real data, write a short, uplifting "intentions" summary (2-3 sentences) that highlights what they're doing well and offers a gentle nudge. Use the data to be specific. Output ONLY a JSON object with this exact structure:
+You are a compassionate financial coach. Based on the user's real data, write a short, uplifting "intentions" summary (2-3 sentences) that highlights what they're doing well and offers a gentle nudge. Use the data to be specific. Output ONLY a JSON object with this exact structure, with no extra commentary before or after it:
 {
   "title": "short, one-line title like 'Balanced & Intentional'",
   "summary": "the 2-3 sentence summary",
@@ -506,8 +511,8 @@ USER DATA:
 
     let analysis;
     try {
-      const { text } = await callAI(prompt);
-      analysis = JSON.parse(stripJsonFence(text));
+      const { text } = await callAI(prompt, null, true);
+      analysis = extractJson(text);
       if (!analysis.title || !analysis.summary || !analysis.focusAreas) {
         throw new Error('Incomplete data from AI provider');
       }
@@ -611,7 +616,7 @@ app.post('/api/action-plan/task-done', authenticate, async (req, res) => {
   }
 });
 
-// ─── TAX ANALYSIS – AI-powered (Groq → Gemini) ─────────────
+// ─── TAX ANALYSIS – AI-powered (Groq → Gemini, JSON-mode enforced) ─────────────
 app.get('/api/tax-analysis', authenticate, async (req, res) => {
   try {
     const profile = await Profile.findOne({ userId: req.userId });
@@ -630,7 +635,7 @@ User data:
 - Filing status: ${filingStatus}
 - Current date: ${currentDate}
 
-Output must be a valid JSON object with these exact keys:
+Output must be a valid JSON object with these exact keys, and nothing else:
 {
   "annualTax": number (estimated total federal + state + FICA + local),
   "effectiveRate": number (as percentage),
@@ -651,8 +656,8 @@ Return ONLY the JSON, no additional text.
 
     let analysis;
     try {
-      const { text } = await callAI(prompt);
-      analysis = JSON.parse(stripJsonFence(text));
+      const { text } = await callAI(prompt, null, true);
+      analysis = extractJson(text);
       if (analysis.annualTax == null || analysis.effectiveRate == null) {
         throw new Error('Incomplete data from AI provider');
       }
@@ -824,7 +829,7 @@ app.get('/', (req, res) => {
   });
 });
 
-// ─── TODAY'S INSIGHT – AI-powered (Groq → Gemini) + real chart data ───
+// ─── TODAY'S INSIGHT – AI-powered (Groq → Gemini, JSON-mode enforced) ───
 app.get('/api/insight/today', authenticate, async (req, res) => {
   try {
     const profile = await Profile.findOne({ userId: req.userId });
@@ -884,8 +889,8 @@ Output must be ONLY valid JSON with these exact keys, no other text:
 
     let parsed;
     try {
-      const { text } = await callAI(prompt);
-      parsed = JSON.parse(stripJsonFence(text));
+      const { text } = await callAI(prompt, null, true);
+      parsed = extractJson(text);
       if (!parsed.title || !parsed.body) {
         throw new Error('Incomplete data from AI provider');
       }
@@ -962,7 +967,6 @@ Answer the user's question concisely and helpfully. You may reference the weekly
     const userMessages = messages.map(m => m.content || '').join('\n');
     const fullPrompt = systemPrompt + '\n\n' + userMessages;
 
-    // Structured chat messages for providers that support role-based turns (Groq)
     const structuredMessages = [
       { role: 'system', content: systemPrompt },
       ...messages.map(m => ({ role: m.role === 'assistant' ? 'assistant' : 'user', content: m.content || '' })),
@@ -970,7 +974,7 @@ Answer the user's question concisely and helpfully. You may reference the weekly
 
     let reply;
     try {
-      const result = await callAI(fullPrompt, structuredMessages);
+      const result = await callAI(fullPrompt, structuredMessages, false);
       reply = result.text;
     } catch (err) {
       console.error('❌ All AI providers failed for chat:', err.message);
