@@ -1142,7 +1142,8 @@ Generate exactly 3 patterns and exactly 3 recommendations, each grounded in the 
   }
 });
 
-// ─── WELLNESS CHECK (AI‑powered) ──────────────────
+
+// ─── WELLNESS CHECK (AI-powered, Groq → Gemini, JSON-mode enforced) ──────────────
 app.get('/api/wellness-check', authenticate, async (req, res) => {
   try {
     const profile = await Profile.findOne({ userId: req.userId });
@@ -1185,41 +1186,99 @@ Output ONLY a valid JSON object with these exact keys:
 Return ONLY the JSON, no additional text.
 `.trim();
 
-    const apiKey = process.env.GEMINI_API_KEY;
-    if (!apiKey) return res.status(500).json({ error: 'Missing GEMINI_API_KEY' });
-
-    const models = ['gemini-2.5-flash', 'gemini-2.5-flash-lite', 'gemini-3-flash-preview'];
-
-    let lastError = null;
-    for (const model of models) {
-      try {
-        const response = await fetch(
-          `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`,
-          {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              contents: [{ role: 'user', parts: [{ text: prompt }] }]
-            })
-          }
-        );
-        const data = await response.json();
-        if (!response.ok) throw new Error(data.error?.message || `Status ${response.status}`);
-        const rawText = data.candidates?.[0]?.content?.parts?.[0]?.text;
-        if (!rawText) throw new Error('No content from Gemini');
-        const jsonStr = rawText.replace(/```json|```/g, '').trim();
-        const result = JSON.parse(jsonStr);
-        return res.json(result);
-      } catch (err) {
-        lastError = err;
+    let result;
+    try {
+      const { text } = await callAI(prompt, null, true);
+      result = extractJson(text);
+      if (result.overallScore == null || !result.scores) {
+        throw new Error('Incomplete data from AI provider');
       }
+    } catch (err) {
+      console.error('❌ All AI providers failed for wellness check:', err.message);
+      return res.status(502).json({ error: err.message || 'Unable to generate wellness check. Please try again later.' });
     }
-    throw lastError || new Error('All models unavailable');
+
+    res.json(result);
   } catch (err) {
     console.error('WELLNESS ERROR:', err);
     res.status(500).json({ error: err.message || 'Internal server error' });
   }
 });
+
+// ─── LEARN & GROW – AI-generated lesson feed + real progress ────────────────
+app.get('/api/learn-grow', authenticate, async (req, res) => {
+  try {
+    const profile = await Profile.findOne({ userId: req.userId });
+    const goals = await Goal.find({ userId: req.userId });
+
+    const income = (profile?.primarySalary || 0) + (profile?.sideIncome || 0);
+    const expenses = (profile?.rent || 0) + (profile?.food || 0) + (profile?.transport || 0) + (profile?.entertainment || 0) + (profile?.monthlyEMI || 0);
+    const primaryGoal = goals.sort((a, b) => (b.priority || 0) - (a.priority || 0))[0];
+
+    const completedSet = new Set(profile?.completedTasks ?? []);
+    const totalLessons = 12; // fixed curriculum length shown in the progress bar
+    const completedLessons = Math.min(completedSet.size, totalLessons);
+
+    const prompt = `
+You are a personal-finance education curator. Based on the user's real data below, generate a short personalized learning feed.
+Never invent numbers – use only the real data provided.
+
+USER DATA:
+- Monthly income: $${income}
+- Monthly expenses: $${expenses}
+- Primary goal: ${primaryGoal ? `${primaryGoal.name || primaryGoal.goalType}, target $${primaryGoal.targetAmount}` : 'none set'}
+- Lessons completed so far: ${completedLessons} of ${totalLessons}
+
+Output ONLY a JSON object with this exact structure, no extra commentary:
+{
+  "featured": {
+    "badge": "short badge text like 'FEATURED'",
+    "time": "estimated read time, e.g. '5 min'",
+    "title": "compelling lesson title tied to their goal or spending pattern",
+    "description": "1-2 sentence hook explaining why this lesson matters for them"
+  },
+  "categories": ["All", "category1", "category2", "category3"],
+  "progressMessage": "1 short encouraging sentence about their learning progress, referencing the real completed/total count",
+  "lessons": [
+    {"title": "lesson title", "time": "e.g. '4 min'", "status": "completed", "category": "category name"},
+    {"title": "lesson title", "time": "e.g. '6 min'", "status": "inProgress", "category": "category name"},
+    {"title": "lesson title", "time": "e.g. '5 min'", "status": "locked", "category": "category name"},
+    {"title": "lesson title", "time": "e.g. '3 min'", "status": "locked", "category": "category name"}
+  ]
+}
+status must be one of: "completed", "inProgress", "locked". Generate exactly 4 lessons and exactly 4 categories (including "All" first).
+`.trim();
+
+    let feed;
+    try {
+      const { text } = await callAI(prompt, null, true);
+      feed = extractJson(text);
+      if (!feed.featured || !feed.lessons || !feed.categories) {
+        throw new Error('Incomplete data from AI provider');
+      }
+    } catch (err) {
+      console.error('❌ All AI providers failed for learn-grow:', err.message);
+      return res.status(502).json({ error: err.message || 'Unable to generate lessons. Please try again later.' });
+    }
+
+    res.json({
+      title: 'Learn & Grow',
+      subtitle: 'Build your financial knowledge, one lesson at a time.',
+      featured: feed.featured,
+      categories: feed.categories,
+      progressCompleted: completedLessons,
+      progressTotal: totalLessons,
+      progressMessage: feed.progressMessage,
+      lessons: feed.lessons,
+    });
+  } catch (err) {
+    console.error('LEARN GROW ERROR:', err);
+    res.status(500).json({ error: err.message || 'Internal server error' });
+  }
+});
+
+
+
 
 // ─── Export for Vercel ──────────────────────────────
 module.exports = app;
