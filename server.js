@@ -1142,7 +1142,84 @@ Generate exactly 3 patterns and exactly 3 recommendations, each grounded in the 
   }
 });
 
+// ─── WELLNESS CHECK (AI‑powered) ──────────────────
+app.get('/api/wellness-check', authenticate, async (req, res) => {
+  try {
+    const profile = await Profile.findOne({ userId: req.userId });
+    const goals = await Goal.find({ userId: req.userId });
 
+    if (!profile) return res.status(404).json({ error: 'Profile not found' });
+
+    const income = (profile.primarySalary || 0) + (profile.sideIncome || 0);
+    const expenses = (profile.rent || 0) + (profile.food || 0) + (profile.transport || 0) + (profile.entertainment || 0) + (profile.monthlyEMI || 0);
+    const savingsRate = income > 0 ? ((income - expenses) / income * 100) : 0;
+
+    const prompt = `
+You are a financial wellness coach. Based on the user's real data, generate a complete financial wellness report in JSON format.
+
+USER DATA:
+- Monthly income: $${income}
+- Monthly expenses: $${expenses}
+- Savings rate: ${savingsRate.toFixed(1)}%
+- Goals: ${JSON.stringify(goals.map(g => ({ name: g.name || g.goalType, target: g.targetAmount, date: g.targetDate, saved: g.existingSavings || 0 })))}
+
+Output ONLY a valid JSON object with these exact keys:
+{
+  "overallScore": number 0-100 (overall financial wellness score),
+  "status": "short status like 'Healthy & Growing' or 'Steady Progress'",
+  "scores": {
+    "spending": number 0-100,
+    "savings": number 0-100,
+    "emotional": number 0-100,
+    "habit": number 0-100
+  },
+  "insights": {
+    "spending": "short description for spending health",
+    "savings": "short description for savings health",
+    "emotional": "short description for emotional health",
+    "habit": "short description for habit health"
+  },
+  "mentorInsight": "2-3 sentence personalized insight about their growth and opportunities",
+  "growthPoints": number (points improved since starting, e.g. 12)
+}
+Return ONLY the JSON, no additional text.
+`.trim();
+
+    const apiKey = process.env.GEMINI_API_KEY;
+    if (!apiKey) return res.status(500).json({ error: 'Missing GEMINI_API_KEY' });
+
+    const models = ['gemini-2.5-flash', 'gemini-2.5-flash-lite', 'gemini-3-flash-preview'];
+
+    let lastError = null;
+    for (const model of models) {
+      try {
+        const response = await fetch(
+          `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`,
+          {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              contents: [{ role: 'user', parts: [{ text: prompt }] }]
+            })
+          }
+        );
+        const data = await response.json();
+        if (!response.ok) throw new Error(data.error?.message || `Status ${response.status}`);
+        const rawText = data.candidates?.[0]?.content?.parts?.[0]?.text;
+        if (!rawText) throw new Error('No content from Gemini');
+        const jsonStr = rawText.replace(/```json|```/g, '').trim();
+        const result = JSON.parse(jsonStr);
+        return res.json(result);
+      } catch (err) {
+        lastError = err;
+      }
+    }
+    throw lastError || new Error('All models unavailable');
+  } catch (err) {
+    console.error('WELLNESS ERROR:', err);
+    res.status(500).json({ error: err.message || 'Internal server error' });
+  }
+});
 
 // ─── Export for Vercel ──────────────────────────────
 module.exports = app;
