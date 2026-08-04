@@ -992,5 +992,84 @@ Answer the user's question concisely and helpfully. You may reference the weekly
   }
 });
 
+
+// ─── MONTHLY REFLECTION (AI-generated) ────────────
+app.get('/api/reflection/monthly', authenticate, async (req, res) => {
+  try {
+    const profile = await Profile.findOne({ userId: req.userId });
+    const goals = await Goal.find({ userId: req.userId });
+
+    if (!profile) return res.status(404).json({ error: 'Profile not found' });
+
+    const income = (profile.primarySalary || 0) + (profile.sideIncome || 0);
+    const expenses = (profile.rent || 0) + (profile.food || 0) + (profile.transport || 0) +
+                     (profile.entertainment || 0) + (profile.monthlyEMI || 0);
+    const net = income - expenses;
+
+    // Get the current month's snapshot if available (optional)
+    const now = new Date();
+    const monthKey = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`;
+    const snapshot = await MonthlySnapshot.findOne({ userId: req.userId, monthKey });
+
+    const primaryGoal = goals.sort((a, b) => (b.priority || 0) - (a.priority || 0))[0];
+
+    const prompt = `
+You are a warm, encouraging financial coach. Based on the user's real data, write a monthly reflection.
+
+USER DATA:
+- Monthly income: $${income}
+- Monthly expenses: $${expenses}
+- Net cash flow: $${net}
+- Primary goal: ${primaryGoal ? `${primaryGoal.name || primaryGoal.goalType} – target $${primaryGoal.targetAmount}` : 'none set'}
+- Goal progress: ${primaryGoal ? `${(primaryGoal.existingSavings || 0)} of ${primaryGoal.targetAmount}` : '0'}
+- (Optional) This month's snapshot (income/expense): ${snapshot ? `income: $${snapshot.income}, expenses: $${snapshot.expenses}` : 'not available'}
+
+Return ONLY a JSON object with the following structure – no extra text:
+{
+  "proudPrompt": "A one‑sentence prompt that asks what the user is proud of this month, referencing their progress (e.g., 'You saved $200 more than last month – what made that possible?')",
+  "coachResponse": "A 2‑sentence personalized insight and encouragement, tied to their data.",
+  "highlights": [
+    {
+      "icon": "IconData name as string (e.g., 'monetization_on')",
+      "iconBgColor": "#FFF9EB",
+      "iconColor": "#F5A623",
+      "title": "Short highlight title",
+      "subtitle": "One-sentence detail"
+    },
+    {
+      "icon": "check_circle_outline",
+      "iconBgColor": "#EAF8F5",
+      "iconColor": "#2E7D32",
+      "title": "Another highlight",
+      "subtitle": "Related to their goal or spending"
+    }
+  ]
+}
+Generate exactly 3 highlights. Use the actual data – never invent numbers.
+`.trim();
+
+    let reflection;
+    try {
+      const { text } = await callAI(prompt, null, true);
+      reflection = extractJson(text);
+      if (!reflection.proudPrompt || !reflection.coachResponse || !reflection.highlights) {
+        throw new Error('Incomplete response from AI');
+      }
+    } catch (err) {
+      console.error('❌ Reflection AI failed:', err.message);
+      return res.status(502).json({ error: err.message || 'Unable to generate reflection. Try again later.' });
+    }
+
+    res.json(reflection);
+  } catch (err) {
+    console.error('REFLECTION ERROR:', err);
+    res.status(500).json({ error: err.message || 'Internal server error' });
+  }
+});
+
+
+
+
+
 // ─── Export for Vercel ──────────────────────────────
 module.exports = app;
