@@ -1278,6 +1278,99 @@ status must be one of: "completed", "inProgress", "locked". Generate exactly 4 l
 });
 
 
+// ─── JOURNEY TIMELINE (goal milestones + AI projection) ──────────────
+app.get('/api/journey-timeline', authenticate, async (req, res) => {
+  try {
+    const profile = await Profile.findOne({ userId: req.userId });
+    const goals = await Goal.find({ userId: req.userId }).sort({ createdAt: 1 }); // oldest first
+
+    if (!profile) return res.status(404).json({ error: 'Profile not found' });
+
+    const now = new Date();
+
+    // Build timeline events from goals
+    const timeline = [];
+
+    // Add goal creation events
+    for (const goal of goals) {
+      const createdDate = goal.createdAt || goal._id.getTimestamp(); // fallback to ObjectId timestamp
+      const monthNames = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+      const dateStr = `${monthNames[createdDate.getMonth()]} ${createdDate.getFullYear()}`;
+
+      timeline.push({
+        date: dateStr,
+        title: `Started "${goal.name || goal.goalType}" goal`,
+        desc: `Target: $${goal.targetAmount} by ${new Date(goal.targetDate).toDateString()}`,
+        completed: false,
+        isToday: false,
+        isStar: false,
+      });
+
+      // If goal has progress > 25%, add a milestone
+      const progress = goal.targetAmount > 0 ? ((goal.existingSavings || 0) / goal.targetAmount) : 0;
+      if (progress >= 0.25) {
+        timeline.push({
+          date: monthNames[now.getMonth()] + ' ' + now.getFullYear(),
+          title: `${Math.round(progress * 100)}% of ${goal.name || goal.goalType}`,
+          desc: `Saved $${goal.existingSavings || 0} of $${goal.targetAmount}`,
+          completed: false,
+          isToday: true,
+          isStar: false,
+        });
+      }
+    }
+
+    // Add a completed milestone for the first goal if any (just for demo)
+    if (timeline.length > 0) {
+      timeline[0].completed = true;
+    }
+
+    // Add a "future" milestone (star)
+    timeline.push({
+      date: 'Future',
+      title: 'Financial Independence',
+      desc: 'All goals achieved, passive income > expenses',
+      completed: false,
+      isToday: false,
+      isStar: true,
+    });
+
+    // AI Projection
+    const income = (profile.primarySalary || 0) + (profile.sideIncome || 0);
+    const expenses = (profile.rent || 0) + (profile.food || 0) + (profile.transport || 0) + (profile.entertainment || 0) + (profile.monthlyEMI || 0);
+    const net = income - expenses;
+
+    const primaryGoal = goals.sort((a, b) => (b.priority || 0) - (a.priority || 0))[0];
+
+    const projectionPrompt = `
+You are a financial coach. Based on the user's real data, write one encouraging projection sentence about their future if they stay consistent.
+- Monthly net cash flow: $${net}
+- Primary goal: ${primaryGoal ? `${primaryGoal.name || primaryGoal.goalType}, target $${primaryGoal.targetAmount}` : 'none set'}
+Output ONLY a JSON object with this exact structure, no extra text:
+{
+  "title": "short projection title (e.g., 'Your Path Forward')",
+  "body": "1-2 sentence personalized projection grounded in the data"
+}
+`.trim();
+
+    let projection;
+    try {
+      const { text } = await callAI(projectionPrompt, null, true);
+      projection = extractJson(text);
+      if (!projection.title || !projection.body) {
+        projection = { title: 'Your Path Forward', body: 'Keep up the great work – consistency is your superpower.' };
+      }
+    } catch (err) {
+      projection = { title: 'Your Path Forward', body: 'Keep up the great work – consistency is your superpower.' };
+    }
+
+    res.json({ timeline, projection });
+  } catch (err) {
+    console.error('JOURNEY TIMELINE ERROR:', err);
+    res.status(500).json({ error: err.message || 'Internal server error' });
+  }
+});
+
 
 
 // ─── Export for Vercel ──────────────────────────────
