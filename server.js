@@ -839,16 +839,12 @@ app.delete('/api/profile/:userId/receipts/:docId', authenticate, authorizeProfil
 // ══════════════════════════════════════════════════════════════════════════════
 //  INTENT ROUTES
 // ══════════════════════════════════════════════════════════════════════════════
-
-// ✅ Save intent WITH optional receipt image upload
-// ✅ Smart intent route – handles both JSON and multipart
+// ✅ Smart intent route (handles JSON and multipart)
 app.post('/api/intent', authenticate, (req, res, next) => {
   const contentType = req.headers['content-type'] || '';
   if (contentType.includes('multipart/form-data')) {
-    // A file is being uploaded → use multer
     uploadReceipt(req, res, next);
   } else {
-    // Plain JSON body → skip multer
     next();
   }
 }, async (req, res) => {
@@ -861,7 +857,6 @@ app.post('/api/intent', authenticate, (req, res, next) => {
     let receiptUrl = null;
     let receiptPublicId = null;
     if (req.file) {
-      // File was uploaded via multipart
       const result = await uploadToCloudinary(req.file.buffer, 'finpath/receipts');
       receiptUrl = result.secure_url;
       receiptPublicId = result.public_id;
@@ -881,28 +876,6 @@ app.post('/api/intent', authenticate, (req, res, next) => {
     res.status(201).json(intent);
   } catch (err) {
     console.error('INTENT SAVE ERROR:', err);
-    res.status(500).json({ error: err.message });
-  }
-});
-app.get('/api/intent', authenticate, async (req, res) => {
-  try {
-    const intents = await Intent.find({ userId: req.userId }).sort({ createdAt: -1 });
-    res.json(intents);
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-});
-
-app.delete('/api/intent/:id', authenticate, async (req, res) => {
-  try {
-    const intent = await Intent.findOneAndDelete({ _id: req.params.id, userId: req.userId });
-    if (!intent) return res.status(404).json({ error: 'Intent not found.' });
-
-    // Delete receipt from Cloudinary
-    if (intent.receiptPublicId) await cloudinary.uploader.destroy(intent.receiptPublicId).catch(() => {});
-
-    res.json({ message: 'Intent deleted.' });
-  } catch (err) {
     res.status(500).json({ error: err.message });
   }
 });
@@ -1923,6 +1896,26 @@ app.get('/api/intent/recent-places', authenticate, async (req, res) => {
     res.status(500).json({ error: err.message });
   }
 });
+
+// ─── GET TODAY'S INTENTS ──────────────────────────
+app.get('/api/intent/today', authenticate, async (req, res) => {
+  try {
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
+    const tomorrow = new Date(today);
+    tomorrow.setDate(tomorrow.getDate() + 1);
+
+    const intents = await Intent.find({
+      userId: req.userId,
+      createdAt: { $gte: today, $lt: tomorrow },
+    }).sort({ createdAt: -1 });
+
+    res.json(intents);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 
 // ─── INTENT INSIGHT (already present, ensure it exists) ───
 app.get('/api/intent/insight', authenticate, async (req, res) => {
