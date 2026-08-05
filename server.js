@@ -179,6 +179,25 @@ const subscriptionSchema = new mongoose.Schema({
 
 const Subscription = mongoose.model('Subscription', subscriptionSchema);
 
+
+
+// ─── Intent Model ──────────────────────────────────
+const intentSchema = new mongoose.Schema({
+  userId:       { type: String, required: true },
+  amount:       { type: Number, required: true },
+  category:     { type: String, required: true },
+  place:        { type: String, default: '' },
+  note:         { type: String, default: '' },
+  paymentMethod:{ type: String, default: '' },
+}, { timestamps: true });
+
+const Intent = mongoose.model('Intent', intentSchema);
+
+
+
+
+
+
 // ─── JWT Helpers ────────────────────────────────────
 const generateToken = (userId) => {
   return jwt.sign({ userId }, JWT_SECRET, { expiresIn: JWT_EXPIRES_IN });
@@ -1492,6 +1511,75 @@ Output ONLY a JSON object with these exact keys:
   }
 });
 
+
+// ─── SAVE INTENTIONAL EXPENSE ──────────────────────
+app.post('/api/intent', authenticate, async (req, res) => {
+  try {
+    const { amount, category, place, note, paymentMethod } = req.body;
+    if (!amount || !category) {
+      return res.status(400).json({ error: 'Amount and category are required.' });
+    }
+    const intent = await Intent.create({
+      userId: req.userId,
+      amount,
+      category,
+      place: place || '',
+      note: note || '',
+      paymentMethod: paymentMethod || '',
+    });
+    res.status(201).json(intent);
+  } catch (err) {
+    console.error('INTENT SAVE ERROR:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+
+
+// ─── NET WORTH ROUTES ──────────────────────────────
+app.get('/api/net-worth', authenticate, async (req, res) => {
+  try {
+    const profile = await Profile.findOne({ userId: req.userId });
+    if (!profile) return res.status(404).json({ error: 'Profile not found' });
+
+    res.json({
+      monthlyIncome: profile.primarySalary || 0,
+      fixedExpenses: (profile.rent || 0) + (profile.monthlyEMI || 0),
+      currentSavings: profile.cashSavings || 0,
+      totalDebt: (profile.totalLoans || 0) + (profile.creditCardDebt || 0),
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.post('/api/net-worth', authenticate, async (req, res) => {
+  try {
+    const { monthlyIncome, fixedExpenses, currentSavings, totalDebt } = req.body;
+    const update = {};
+
+    if (monthlyIncome !== undefined) update.primarySalary = monthlyIncome;
+    if (fixedExpenses !== undefined) {
+      // store fixed expenses as rent for simplicity
+      update.rent = fixedExpenses;
+      update.monthlyEMI = 0;
+    }
+    if (currentSavings !== undefined) update.cashSavings = currentSavings;
+    if (totalDebt !== undefined) {
+      update.totalLoans = totalDebt;
+      update.creditCardDebt = 0;
+    }
+
+    const profile = await Profile.findOneAndUpdate(
+      { userId: req.userId },
+      { $set: update },
+      { new: true, upsert: true, runValidators: true }
+    );
+    res.json(profile);
+  } catch (err) {
+    res.status(400).json({ error: err.message });
+  }
+});
 
 
 // ─── Export for Vercel ──────────────────────────────
