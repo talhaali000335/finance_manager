@@ -1942,6 +1942,29 @@ User is about to make a purchase in category "${category}" for $${amount}. Their
 });
 
 
+app.get('/api/intent/insight/daily', authenticate, async (req, res) => {
+  try {
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
+    const intents = await Intent.find({
+      userId: req.userId,
+      createdAt: { $gte: today },
+    });
+    const total = intents.reduce((sum, i) => sum + i.amount, 0);
+    const categories = [...new Set(intents.map(i => i.category))].join(', ');
+    const prompt = `
+You are a cheerful financial companion. Based on the user's data below, write a ONE-SENTENCE encouraging daily banner (max 15 words). Do NOT include quotation marks.
+- Today's total spending: $${total.toFixed(2)}
+- Categories: ${categories || 'none'}
+Output ONLY the sentence, no extra text.
+`.trim();
+    const { text } = await callAI(prompt, null, false);
+    res.json({ message: text.trim() });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // ══════════════════════════════════════════════════════════════════════════════
 //  HEALTH CHECK & ERROR HANDLING
 // ══════════════════════════════════════════════════════════════════════════════
