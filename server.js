@@ -1907,10 +1907,18 @@ app.get('/api/intent/recent-places', authenticate, async (req, res) => {
 // ─── GET TODAY'S INTENTS ──────────────────────────
 app.get('/api/intent/today', authenticate, async (req, res) => {
   try {
-    const today = new Date();
-    today.setHours(0, 0, 0, 0);
-    const tomorrow = new Date(today);
-    tomorrow.setDate(tomorrow.getDate() + 1);
+    const TZ_OFFSET_HOURS = 5; // Pakistan Standard Time, UTC+5
+    const nowUtc = new Date();
+    const localNow = new Date(nowUtc.getTime() + TZ_OFFSET_HOURS * 60 * 60 * 1000);
+
+    const localMidnight = new Date(Date.UTC(
+      localNow.getUTCFullYear(),
+      localNow.getUTCMonth(),
+      localNow.getUTCDate(),
+      0, 0, 0, 0
+    ));
+    const today = new Date(localMidnight.getTime() - TZ_OFFSET_HOURS * 60 * 60 * 1000);
+    const tomorrow = new Date(today.getTime() + 24 * 60 * 60 * 1000);
 
     const intents = await Intent.find({
       userId: req.userId,
@@ -1922,7 +1930,6 @@ app.get('/api/intent/today', authenticate, async (req, res) => {
     res.status(500).json({ error: err.message });
   }
 });
-
 
 // ─── INTENT INSIGHT (already present, ensure it exists) ───
 app.get('/api/intent/insight', authenticate, async (req, res) => {
@@ -1944,12 +1951,22 @@ User is about to make a purchase in category "${category}" for $${amount}. Their
 
 app.get('/api/intent/insight/daily', authenticate, async (req, res) => {
   try {
-    const today = new Date();
-    today.setHours(0, 0, 0, 0);
+    const TZ_OFFSET_HOURS = 5;
+    const nowUtc = new Date();
+    const localNow = new Date(nowUtc.getTime() + TZ_OFFSET_HOURS * 60 * 60 * 1000);
+    const localMidnight = new Date(Date.UTC(
+      localNow.getUTCFullYear(),
+      localNow.getUTCMonth(),
+      localNow.getUTCDate(),
+      0, 0, 0, 0
+    ));
+    const today = new Date(localMidnight.getTime() - TZ_OFFSET_HOURS * 60 * 60 * 1000);
+
     const intents = await Intent.find({
       userId: req.userId,
       createdAt: { $gte: today },
     });
+    
     const total = intents.reduce((sum, i) => sum + i.amount, 0);
     const categories = [...new Set(intents.map(i => i.category))].join(', ');
     const prompt = `
