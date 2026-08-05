@@ -836,49 +836,6 @@ app.delete('/api/profile/:userId/receipts/:docId', authenticate, authorizeProfil
   }
 });
 
-// ══════════════════════════════════════════════════════════════════════════════
-//  INTENT ROUTES
-// ══════════════════════════════════════════════════════════════════════════════
-// ✅ Smart intent route (handles JSON and multipart)
-app.post('/api/intent', authenticate, (req, res, next) => {
-  const contentType = req.headers['content-type'] || '';
-  if (contentType.includes('multipart/form-data')) {
-    uploadReceipt(req, res, next);
-  } else {
-    next();
-  }
-}, async (req, res) => {
-  try {
-    const { amount, category, place, note, paymentMethod } = req.body;
-    if (!amount || !category) {
-      return res.status(400).json({ error: 'Amount and category are required.' });
-    }
-
-    let receiptUrl = null;
-    let receiptPublicId = null;
-    if (req.file) {
-      const result = await uploadToCloudinary(req.file.buffer, 'finpath/receipts');
-      receiptUrl = result.secure_url;
-      receiptPublicId = result.public_id;
-    }
-
-    const intent = await Intent.create({
-      userId: req.userId,
-      amount,
-      category,
-      place: place || '',
-      note: note || '',
-      paymentMethod: paymentMethod || '',
-      receiptUrl,
-      receiptPublicId,
-    });
-
-    res.status(201).json(intent);
-  } catch (err) {
-    console.error('INTENT SAVE ERROR:', err);
-    res.status(500).json({ error: err.message });
-  }
-});
 
 // ══════════════════════════════════════════════════════════════════════════════
 //  CLOUDINARY SIGNATURE (for direct client-side uploads)
@@ -1873,6 +1830,56 @@ app.post('/api/net-worth', authenticate, async (req, res) => {
     res.status(400).json({ error: err.message });
   }
 });
+
+
+
+
+
+// ══════════════════════════════════════════════════════════════════════════════
+//  INTENT ROUTES
+// ══════════════════════════════════════════════════════════════════════════════
+// ✅ Smart intent route (handles JSON and multipart)
+app.post('/api/intent', authenticate, (req, res, next) => {
+  const contentType = req.headers['content-type'] || '';
+  if (contentType.includes('multipart/form-data')) {
+    uploadReceipt(req, res, next);
+  } else {
+    next();
+  }
+}, async (req, res) => {
+  try {
+    console.log('INTENT BODY:', req.body); // ← add this temporarily
+    const { amount, category, place, note, paymentMethod } = req.body;
+    if (!amount || !category) {
+      return res.status(400).json({ error: 'Amount and category are required.' });
+    }
+
+    let receiptUrl = null;
+    let receiptPublicId = null;
+    if (req.file) {
+      const result = await uploadToCloudinary(req.file.buffer, 'finpath/receipts');
+      receiptUrl = result.secure_url;
+      receiptPublicId = result.public_id;
+    }
+
+    const intent = await Intent.create({
+      userId: req.userId,
+      amount,
+      category,
+      place: place || '',
+      note: note || '',
+      paymentMethod: paymentMethod || '',
+      receiptUrl,
+      receiptPublicId,
+    });
+
+    res.status(201).json(intent);
+  } catch (err) {
+    console.error('INTENT SAVE ERROR:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
 
 
 
