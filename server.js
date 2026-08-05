@@ -1904,15 +1904,43 @@ app.post('/api/net-worth', authenticate, async (req, res) => {
 
 
 
-// ── Recent Places (needs server endpoint) ──
-   app.get('/api/intent/recent-places', authenticate, async (req, res) => {
+// ─── RECENT PLACES ──────────────────────────────────
+app.get('/api/intent/recent-places', authenticate, async (req, res) => {
+  try {
     const intents = await Intent.find({ userId: req.userId, place: { $ne: '' } })
-       .sort({ createdAt: -1 }).limit(5);
-    res.json(intents.map(i => i.place).filter((v,i,a)=>a.indexOf(v)===i));
-  });
+      .sort({ createdAt: -1 })
+      .limit(20);
+    const unique = [];
+    const seen   = new Set();
+    for (const i of intents) {
+      if (!seen.has(i.place)) {
+        seen.add(i.place);
+        unique.push(i.place);
+        if (unique.length === 5) break;
+      }
+    }
+    res.json(unique);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
 
-
-
+// ─── INTENT INSIGHT (already present, ensure it exists) ───
+app.get('/api/intent/insight', authenticate, async (req, res) => {
+  try {
+    const { category, amount } = req.query;
+    if (!category || !amount) return res.status(400).json({ error: 'category and amount required' });
+    const profile = await Profile.findOne({ userId: req.userId });
+    const prompt = `
+User is about to make a purchase in category "${category}" for $${amount}. Their monthly income: $${profile?.primarySalary || 0}. Give a one‑sentence encouraging, non‑judgmental insight that connects this purchase to their financial goals. Output ONLY a JSON: { "message": "..." }
+`.trim();
+    const { text } = await callAI(prompt, null, true);
+    const parsed = extractJson(text);
+    res.json(parsed);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
 
 
 // ══════════════════════════════════════════════════════════════════════════════
