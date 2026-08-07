@@ -1886,16 +1886,18 @@ app.post('/api/intent', authenticate, (req, res, next) => {
 // ─── RECENT PLACES ──────────────────────────────────
 app.get('/api/intent/recent-places', authenticate, async (req, res) => {
   try {
-    const intents = await Intent.find({ userId: req.userId, place: { $ne: '' } })
+    const intents = await Intent.find({ userId: req.userId })
       .sort({ createdAt: -1 })
-      .limit(20);
+      .limit(200); // look at a much larger recent window
+
     const unique = [];
-    const seen   = new Set();
+    const seen = new Set();
     for (const i of intents) {
-      if (!seen.has(i.place)) {
-        seen.add(i.place);
-        unique.push(i.place);
-        if (unique.length === 5) break;
+      const label = (i.place && i.place.trim()) || (i.note && i.note.trim());
+      if (label && !seen.has(label)) {
+        seen.add(label);
+        unique.push(label);
+        if (unique.length === 20) break; // raise cap, not stuck at 5
       }
     }
     res.json(unique);
