@@ -2416,6 +2416,127 @@ Output ONLY a JSON object:
   }
 });
 
+app.get('/api/your-evolution', authenticate, async (req, res) => {
+  try {
+    const profile = await Profile.findOne({ userId: req.userId });
+    const goals   = await Goal.find({ userId: req.userId });
+    if (!profile) return res.status(404).json({ error: 'Profile not found' });
+
+    // Gather real numbers for the AI
+    const income = (profile.primarySalary || 0) + (profile.sideIncome || 0);
+    const expenses = (profile.rent || 0) + (profile.food || 0) + (profile.transport || 0) + (profile.entertainment || 0) + (profile.monthlyEMI || 0);
+    const net = income - expenses;
+
+    const primaryGoal = goals.sort((a, b) => (b.priority || 0) - (a.priority || 0))[0];
+
+    // Last 3 monthly snapshots for progression context
+    const snapshots = await MonthlySnapshot.find({ userId: req.userId }).sort({ monthKey: -1 }).limit(3);
+    const snapshotInfo = snapshots.reverse().map(s => ({
+      month: s.monthKey,
+      income: s.income,
+      expenses: s.expenses,
+      saved: Math.max(s.income - s.expenses, 0)
+    }));
+
+    const prompt = `
+You are a compassionate financial coach. Create a personalised "Your Evolution" timeline for the user based on their real data.
+
+User data:
+- Monthly income: $${income.toFixed(0)}
+- Monthly expenses: $${expenses.toFixed(0)}
+- Net cash flow: $${net.toFixed(0)}
+- Primary goal: ${primaryGoal ? `${primaryGoal.name || primaryGoal.goalType}, target $${primaryGoal.targetAmount}` : 'none set'}
+- Recent monthly snapshots (newest first): ${JSON.stringify(snapshotInfo)}
+
+Output ONLY a JSON object with this exact structure:
+
+{
+  "title": "Your Evolution",
+  "subtitle": "See how far you’ve come on your financial journey",
+  "timeline": [
+    {
+      "date": "Month name (e.g., 'January')",
+      "title": "short title (max 4 words)",
+      "desc": "1 sentence description of the emotional state or financial milestone",
+      "iconBgColor": "0xFFE6DCCF",
+      "icon": "sentiment_dissatisfied",
+      "iconColor": "0xFF796856",
+      "isActive": false
+    },
+    {
+      "date": "Month name",
+      "title": "short title",
+      "desc": "1 sentence description",
+      "iconBgColor": "0xFFF0EAE2",
+      "icon": "sentiment_neutral",
+      "iconColor": "0xFF6B7280",
+      "isActive": false
+    },
+    {
+      "date": "Current month name",
+      "title": "short title",
+      "desc": "1 sentence description – this should be the current positive milestone",
+      "iconBgColor": "0xFFD1FAE5",
+      "icon": "sentiment_satisfied",
+      "iconColor": "0xFF059669",
+      "isActive": true
+    },
+    {
+      "date": "Future (e.g., 'Next Month')",
+      "title": "short title (optimistic future milestone)",
+      "desc": "1 sentence optimistic projection",
+      "iconBgColor": "0xFFFFF3E0",
+      "icon": "star",
+      "iconColor": "0xFFF59E0B",
+      "isActive": false
+    }
+  ],
+  "metrics": {
+    "mindset": "number 0-100",
+    "confidence": "number 0-100",
+    "knowledge": "number 0-100"
+  },
+  "quote": {
+    "label": "MONEY MINDSET",
+    "text": "a motivational quote about financial growth (max 15 words)"
+  }
+}
+
+Make the timeline dates realistic (e.g., past months, current month, future). The active milestone should be the current month. Use the real data to make the titles and descriptions specific. The metrics should reflect the user's financial progress. Return ONLY the JSON, no other text.`.trim();
+
+    let evolution;
+    try {
+      const { text } = await callAI(prompt, null, true);
+      evolution = extractJson(text);
+      if (!evolution.title || !evolution.timeline) throw new Error('Incomplete AI response');
+    } catch (err) {
+      console.error('❌ AI failed for your-evolution:', err.message);
+      // Fallback with realistic defaults
+      const monthNames = ['January','February','March','April','May','June','July','August','September','October','November','December'];
+      const currentMonth = monthNames[new Date().getMonth()];
+      evolution = {
+        title: 'Your Evolution',
+        subtitle: 'See how far you’ve come on your financial journey',
+        timeline: [
+          { date: monthNames[(new Date().getMonth()-3+12)%12], title: 'Starting Out', desc: 'Felt overwhelmed but determined.', iconBgColor: '0xFFE6DCCF', icon: 'sentiment_dissatisfied', iconColor: '0xFF796856', isActive: false },
+          { date: monthNames[(new Date().getMonth()-1+12)%12], title: 'Building Habits', desc: 'Steady progress and first savings.', iconBgColor: '0xFFF0EAE2', icon: 'sentiment_neutral', iconColor: '0xFF6B7280', isActive: false },
+          { date: currentMonth, title: 'Gaining Confidence', desc: 'Feeling in control and optimistic.', iconBgColor: '0xFFD1FAE5', icon: 'sentiment_satisfied', iconColor: '0xFF059669', isActive: true },
+          { date: 'Future', title: 'Financial Freedom', desc: 'Passive income covers all expenses.', iconBgColor: '0xFFFFF3E0', icon: 'star', iconColor: '0xFFF59E0B', isActive: false }
+        ],
+        metrics: { mindset: 75, confidence: 70, knowledge: 65 },
+        quote: { label: 'MONEY MINDSET', text: 'Wealth is the ability to fully experience life.' }
+      };
+    }
+
+    res.json(evolution);
+  } catch (err) {
+    console.error('EVOLUTION ENDPOINT ERROR:', err);
+    res.status(500).json({ error: err.message || 'Internal server error' });
+  }
+});
+
+
+
 
 
 // ══════════════════════════════════════════════════════════════════════════════
