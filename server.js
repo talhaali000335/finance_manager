@@ -2273,6 +2273,150 @@ The month name in the dates should be exactly "${currentMonth}".`.trim();
 });
 
 
+app.get('/api/monthly-snapshot', authenticate, async (req, res) => {
+  try {
+    const profile = await Profile.findOne({ userId: req.userId });
+    const goals   = await Goal.find({ userId: req.userId }).limit(2); // first two active goals
+    if (!profile) return res.status(404).json({ error: 'Profile not found' });
+
+    const now = new Date();
+    const currentMonthKey = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`;
+    const monthNames = ['January','February','March','April','May','June','July','August','September','October','November','December'];
+    const currentMonthName = monthNames[now.getMonth()];
+
+    // 1. Get current month's income / expenses from monthly snapshot
+    let snapshot = await MonthlySnapshot.findOne({ userId: req.userId, monthKey: currentMonthKey });
+    // If no snapshot yet (very early in month), use profile defaults
+    const income   = snapshot ? snapshot.income : ((profile.primarySalary || 0) + (profile.sideIncome || 0));
+    const expenses = snapshot ? snapshot.expenses : ((profile.rent || 0) + (profile.food || 0) + (profile.transport || 0) + (profile.entertainment || 0) + (profile.monthlyEMI || 0));
+    const saved    = Math.max(income - expenses, 0);
+
+    // 2. Previous month snapshot for comparison (trends)
+    const prevMonth = new Date(now.getFullYear(), now.getMonth() - 1, 1);
+    const prevMonthKey = `${prevMonth.getFullYear()}-${String(prevMonth.getMonth() + 1).padStart(2, '0')}`;
+    const prevSnapshot = await MonthlySnapshot.findOne({ userId: req.userId, monthKey: prevMonthKey });
+    const prevIncome   = prevSnapshot ? prevSnapshot.income : income;
+    const prevExpenses = prevSnapshot ? prevSnapshot.expenses : expenses;
+    const prevSaved    = Math.max(prevIncome - prevExpenses, 0);
+
+    // Trends (percentage change, handle zeros)
+    const incomeTrend  = prevIncome > 0  ? ((income - prevIncome) / prevIncome * 100).toFixed(1) : '0';
+    const expenseTrend = prevExpenses > 0 ? ((expenses - prevExpenses) / prevExpenses * 100).toFixed(1) : '0';
+    const savedTrend   = prevSaved > 0    ? ((saved - prevSaved) / prevSaved * 100).toFixed(1) : '0';
+
+    // 3. Savings rate
+    const savingsRate = income > 0 ? Math.round((saved / income) * 100) : 0;
+
+    // 4. Active goals (top 2)
+    const activeGoals = goals.map(g => {
+      const target = g.targetAmount || 0;
+      const current = g.existingSavings || 0;
+      const progress = target > 0 ? current / target : 0;
+      return {
+        title: g.name || g.goalType,
+        progress: progress,
+        label: `$${current.toFixed(0)} of $${target.toFixed(0)}`
+      };
+    });
+
+    // 5. Top spending categories from profile (simplified)
+    const categories = [
+      { name: 'Housing',     amount: profile.rent || 0 },
+      { name: 'Food',        amount: profile.food || 0 },
+      { name: 'Shopping',    amount: profile.entertainment || 0 }
+    ].filter(c => c.amount > 0).sort((a,b) => b.amount - a.amount).slice(0, 3);
+    const totalCat = categories.reduce((sum, c) => sum + c.amount, 0) || 1;
+    const topCategories = categories.map(c => ({
+      name: c.name,
+      percent: Math.round(c.amount / totalCat * 100)
+    }));
+
+    // 6. AI-generated insight & momentum message
+    const prompt = `
+You are a friendly financial coach. Generate TWO short phrases based on the user's real data.
+
+User data:
+- Month: ${currentMonthName}
+- Income: $${income.toFixed(0)} (vs last month: ${incomeTrend}%)
+- Expenses: $${expenses.toFixed(0)} (vs last month: ${expenseTrend}%)
+- Saved: $${saved.toFixed(0)}
+- Savings rate: ${savingsRate}%
+- Active goals: ${JSON.stringify(activeGoals)}
+- Top spending: ${JSON.stringify(topCategories)}
+
+Output ONLY a JSON object:
+{
+  "insightMessage": "a 1-2 sentence personalised insight about this month's finances, warm and encouraging",
+  "momentumTitle": "short title like '3 Month Streak!' or 'You're on Fire'",
+  "momentumSubtitle": "1 short sentence about the momentum, e.g. 'Your savings are growing every month'"
+}`.trim();
+
+    let ai = {};
+    try {
+      const { text } = await callAI(prompt, null, true);
+      ai = extractJson(text);
+      if (!ai.insightMessage || !ai.momentumTitle) throw new Error('Incomplete AI');
+    } catch (err) {
+      console.error('AI fallback for monthly-snapshot');
+      ai = {
+        insightMessage: `You're doing great this month – keep up the consistent effort!`,
+        momentumTitle: 'Keep it up!',
+        momentumSubtitle: `Your savings rate is ${savingsRate}% this month.`
+      };
+    }
+
+    // Assemble response
+    res.json({
+      monthName: currentMonthName,
+      title: `Your ${currentMonthName} Snapshot`,
+      subtitle: `${currentMonthName} at a glance`,
+      dateButton: `${currentMonthName} 1 – ${currentMonthName} ${new Date(now.getFullYear(), now.getMonth() + 1, 0).getDate()}`, // e.g. "August 1 – 31"
+      income: {
+        label: 'Income',
+        amount: `$${income.toFixed(0)}`,
+        trend: `${incomeTrend}%`,
+        isUp: incomeTrend >= 0
+      },
+      expenses: {
+        label: 'Expenses',
+        amount: `$${expenses.toFixed(0)}`,
+        trend: `${expenseTrend}%`,
+        isUp: expenseTrend >= 0
+      },
+      saved: {
+        label: 'Saved',
+        amount: `$${saved.toFixed(0)}`,
+        trend: `${savedTrend}%`,
+        isUp: savedTrend >= 0
+      },
+      savingsRate: {
+        label: 'Savings Rate',
+        percent: `${savingsRate}%`,
+        description: `That's ${savingsRate >= 20 ? 'above' : 'just below'} the recommended 20% – ${savingsRate >= 20 ? 'fantastic!' : 'a little push could boost it.'}`,
+        progress: savingsRate / 100
+      },
+      activeGoals: {
+        title: 'Active Goals',
+        goals: activeGoals
+      },
+      momentum: {
+        title: ai.momentumTitle,
+        subtitle: ai.momentumSubtitle
+      },
+      topCategories: {
+        title: 'Top Categories',
+        categories: topCategories,
+        // colors for the chart – kept client side for simplicity, but could be generated
+      },
+      insightMessage: ai.insightMessage
+    });
+  } catch (err) {
+    console.error('MONTHLY SNAPSHOT ERROR:', err);
+    res.status(500).json({ error: err.message || 'Internal server error' });
+  }
+});
+
+
 
 // ══════════════════════════════════════════════════════════════════════════════
 //  HEALTH CHECK & ERROR HANDLING
