@@ -3255,12 +3255,15 @@ Make all text specific to the goal and the numbers.`.trim();
 
 
 
+
+
 app.get('/api/habit-trends', authenticate, async (req, res) => {
   try {
     const profile = await Profile.findOne({ userId: req.userId });
     const intents = await Intent.find({ userId: req.userId });
-    // Get monthly snapshots for last 6 months
     const now = new Date();
+    
+    // Generate last 6 months
     const months = [];
     for (let i = 5; i >= 0; i--) {
       const d = new Date(now.getFullYear(), now.getMonth() - i, 1);
@@ -3278,12 +3281,12 @@ app.get('/api/habit-trends', authenticate, async (req, res) => {
     const snapshotMap = {};
     snapshots.forEach(s => { snapshotMap[s.monthKey] = s; });
 
-    // Compute savings (green) and impulse spending (yellow) per month
     const impulseCategories = ['entertainment', 'food', 'shopping'];
     const savingsData = [];
     const impulseData = [];
 
-    months.forEach(month => {
+    // 🔧 FIXED: use (month, i) to get the index
+    months.forEach((month, i) => {
       const snap = snapshotMap[month.key];
       const income = snap ? snap.income : (profile ? (profile.primarySalary || 0) + (profile.sideIncome || 0) : 0);
       const expenses = snap ? snap.expenses : (profile ? (profile.rent || 0) + (profile.food || 0) + (profile.transport || 0) + (profile.entertainment || 0) + (profile.monthlyEMI || 0) : 0);
@@ -3315,14 +3318,14 @@ app.get('/api/habit-trends', authenticate, async (req, res) => {
     };
 
     const greenPoints = savingsData.map((val, i) => {
-      const x = 10 + (280 / 5) * i;  // 10 to 290
-      const y = mapToView(val, minSavings, maxSavings, 95, 25); // inverted: higher savings -> lower y
+      const x = 10 + (280 / 5) * i;
+      const y = mapToView(val, minSavings, maxSavings, 95, 25);
       return { x, y: Math.round(y) };
     });
 
     const yellowPoints = impulseData.map((val, i) => {
       const x = 10 + (280 / 5) * i;
-      const y = mapToView(val, minImpulse, maxImpulse, 32, 100); // higher impulse -> higher y
+      const y = mapToView(val, minImpulse, maxImpulse, 32, 100);
       return { x, y: Math.round(y) };
     });
 
@@ -3402,8 +3405,6 @@ Output ONLY a JSON object with this exact structure:
     res.status(500).json({ error: err.message || 'Internal server error' });
   }
 });
-
-
 
 
 // ══════════════════════════════════════════════════════════════════════════════
