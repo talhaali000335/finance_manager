@@ -2698,33 +2698,34 @@ app.get('/api/patterns', authenticate, async (req, res) => {
     const prevMonth = new Date(now.getFullYear(), now.getMonth() - 1, 1);
     const prevMonthKey = `${prevMonth.getFullYear()}-${String(prevMonth.getMonth() + 1).padStart(2, '0')}`;
 
-    // --- Daily spending averages (for weekend alert bars) ---
+    // Daily spending averages (for weekend alert bars)
     const days = ['Sun','Mon','Tue','Wed','Thu','Fri','Sat'];
     const dayTotals = Object.fromEntries(days.map(d => [d, 0]));
     const dayCounts = Object.fromEntries(days.map(d => [d, 0]));
+
     intents.forEach(i => {
       const d = days[new Date(i.createdAt).getDay()];
       dayTotals[d] += i.amount;
       dayCounts[d] += 1;
     });
+
     const dailyAvgs = days.map(d => dayCounts[d] ? dayTotals[d] / dayCounts[d] : 0);
     const maxAvg = Math.max(...dailyAvgs, 1);
-    // Scale heights to 0–16 (matching the original UI scale)
+
     const barData = days.map((d, i) => ({
       day: d,
       height: Math.round((dailyAvgs[i] / maxAvg) * 16),
-      color: dailyAvgs[i] === maxAvg ? '0xFFEF4444' : '0xFFE5E7EB',  // red for peak day
+      color: dailyAvgs[i] === maxAvg ? '0xFFEF4444' : '0xFFE5E7EB',
     }));
 
-    // --- Category trends (Top 3 spending categories) ---
+    // Category trends
     const catMap = { food: 'Food', transport: 'Transport', entertainment: 'Entertainment' };
-    // Calculate monthly spending per category from profile fields (simplified)
     const catSpending = [
       { key: 'food', label: 'Food', current: profile.food || 0 },
       { key: 'transport', label: 'Transport', current: profile.transport || 0 },
       { key: 'entertainment', label: 'Entertainment', current: profile.entertainment || 0 },
     ];
-    // For previous month we don't have historical profile – we could use MonthlySnapshot? Let's approximate with intents.
+
     const prevIntents = intents.filter(i => {
       const d = new Date(i.createdAt);
       return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}` === prevMonthKey;
@@ -2733,6 +2734,7 @@ app.get('/api/patterns', authenticate, async (req, res) => {
     prevIntents.forEach(i => {
       if (catMap[i.category]) prevCatTotals[i.category] += i.amount;
     });
+
     const currIntents = intents.filter(i => {
       const d = new Date(i.createdAt);
       return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}` === currentMonth;
@@ -2743,33 +2745,31 @@ app.get('/api/patterns', authenticate, async (req, res) => {
     });
 
     const trendItems = catSpending.map(cat => {
-      const prev = prevCatTotals[cat.key] || cat.current * 0.9; // fallback
+      const prev = prevCatTotals[cat.key] || cat.current * 0.9;
       const curr = currCatTotals[cat.key] || cat.current;
       const diff = prev > 0 ? ((curr - prev) / prev) * 100 : 0;
-      const isUp = diff > 5 ? true : (diff < -5 ? false : null); // null for flat
+      const isUp = diff > 5 ? true : (diff < -5 ? false : null);
       return {
         title: cat.label,
         trend: `${diff > 0 ? '+' : ''}${Math.round(diff)}% vs last month`,
         isUp: isUp,
-        imageUrl: null,  // will be generated on frontend using category initial if needed
+        imageUrl: null,
       };
     });
 
-    // --- Heatmap colours (daily intentionality) ---
-    // Normalize spending to a 0-1 scale and map to a colour gradient
+    // Heatmap colours (corrected JavaScript)
     const heatColors = days.map((d, i) => {
       const ratio = maxAvg > 0 ? dailyAvgs[i] / maxAvg : 0;
-      // interpolate between teal (low) and red (high)
       const r = Math.round(239 * ratio);
       const g = Math.round(68 + (187 * (1 - ratio)));
       const b = Math.round(68 + (187 * (1 - ratio)));
       return {
         day: d,
-        color: `0xFF${r.toRadixString(16).padStart(2, '0')}${g.toRadixString(16).padStart(2, '0')}${b.toRadixString(16).padStart(2, '0')}`,
+        color: `0xFF${r.toString(16).padStart(2, '0')}${g.toString(16).padStart(2, '0')}${b.toString(16).padStart(2, '0')}`,
       };
     });
 
-    // --- AI generated text ---
+    // AI generated text
     const prompt = `
 You are a financial behaviour coach. Based on the user's real data below, generate the content for a "Your Patterns" screen.
 
@@ -2820,14 +2820,14 @@ Use the real numbers to make the text specific.`.trim();
       subtitle: ai.subtitle,
       weekendAlert: {
         ...ai.weekendAlert,
-        bars: barData,               // the computed bar chart data
+        bars: barData,
       },
       trendingTitle: ai.trendingTitle,
       trendItems,
       nudge: ai.nudge,
       heatmap: {
         ...ai.heatmap,
-        days: heatColors,            // the computed heatmap colours
+        days: heatColors,
       },
     });
   } catch (err) {
@@ -2835,8 +2835,6 @@ Use the real numbers to make the text specific.`.trim();
     res.status(500).json({ error: err.message || 'Internal server error' });
   }
 });
-
-
 
 
 
