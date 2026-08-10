@@ -2068,6 +2068,119 @@ Output ONLY a JSON object with this exact structure:
     res.status(500).json({ error: err.message || 'Internal server error' });
   }
 });
+
+
+
+app.get('/api/june-report', authenticate, async (req, res) => {
+  try {
+    const profile = await Profile.findOne({ userId: req.userId });
+    const goals   = await Goal.find({ userId: req.userId });
+    if (!profile) return res.status(404).json({ error: 'Profile not found' });
+
+    const income   = (profile.primarySalary || 0) + (profile.sideIncome || 0);
+    const expenses = (profile.rent || 0) + (profile.food || 0) + (profile.transport || 0) + (profile.entertainment || 0) + (profile.monthlyEMI || 0);
+    const saved    = Math.max(income - expenses, 0);
+
+    // Previous month comparison
+    const now = new Date();
+    const prevMonth = new Date(now.getFullYear(), now.getMonth() - 1, 1);
+    const prevMonthKey = `${prevMonth.getFullYear()}-${String(prevMonth.getMonth() + 1).padStart(2, '0')}`;
+    const prevSnapshot = await MonthlySnapshot.findOne({ userId: req.userId, monthKey: prevMonthKey });
+    const vsLastMonthPercent = prevSnapshot && prevSnapshot.expenses > 0
+      ? Math.round(((expenses - prevSnapshot.expenses) / prevSnapshot.expenses) * 100)
+      : 0;
+
+    // Category adherence (category vs a soft budget guess: 30% of income split across categories)
+    const categoryDefs = [
+      { key: 'food',          label: 'Food & Dining' },
+      { key: 'transport',     label: 'Transport' },
+      { key: 'entertainment', label: 'Entertainment' },
+      { key: 'rent',          label: 'Housing' },
+    ];
+    const categories = categoryDefs
+      .map(c => {
+        const spent = profile[c.key] || 0;
+        const budget = c.key === 'rent' ? spent || 1 : Math.max(income * 0.1, spent, 1);
+        const percent = Math.min(spent / budget, 1);
+        return {
+          label: c.label,
+          amountLabel: `$${spent.toFixed(0)} / $${budget.toFixed(0)}`,
+          percent,
+          isWarning: percent >= 0.9,
+        };
+      })
+      .filter(c => c.amountLabel !== '$0 / $1');
+
+    // Savings momentum: last 6 monthly snapshots -> savings per month
+    const snapshots = await MonthlySnapshot.find({ userId: req.userId }).sort({ monthKey: -1 }).limit(6);
+    const ordered = snapshots.reverse();
+    const monthNamesShort = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+    const chartMonths = ordered.map(s => monthNamesShort[parseInt(s.monthKey.split('-')[1], 10) - 1]);
+    const chartSavings = ordered.map(s => Math.max(s.income - s.expenses, 0));
+
+    const primaryGoal = goals.sort((a, b) => (b.priority || 0) - (a.priority || 0))[0];
+
+    // AI-generated highlights + insight (Groq -> Gemini fallback, same as rest of the app)
+    const prompt = `
+You are a warm, encouraging financial coach writing a "Monthly Report" summary card for a finance app.
+Use ONLY the real data below — never invent numbers.
+
+USER DATA:
+- Monthly income: $${income}
+- Monthly expenses: $${expenses}
+- Amount saved this month: $${saved}
+- Change in expenses vs last month: ${vsLastMonthPercent}%
+- Category spending: ${JSON.stringify(categories.map(c => ({ label: c.label, amountLabel: c.amountLabel })))}
+- Primary goal: ${primaryGoal ? `${primaryGoal.name || primaryGoal.goalType}, target $${primaryGoal.targetAmount}` : 'none set'}
+
+Output ONLY a JSON object with this exact structure, no extra commentary:
+{
+  "heroTitle": "short 2-4 word title like 'You crushed it!'",
+  "highlight1": "short highlight phrase (max 6 words) about savings, e.g. 'Saved 15% more than May'",
+  "highlight2": "short highlight phrase (max 6 words) about a specific category or habit",
+  "highlight3": "short highlight phrase (max 6 words) about a trend, e.g. 'Spending trending down'",
+  "insightBody": "1-2 sentence encouraging insight tying the numbers together, addressed to the user"
+}`.trim();
+
+    let ai;
+    try {
+      const { text } = await callAI(prompt, null, true);
+      ai = extractJson(text);
+      if (!ai.heroTitle || !ai.insightBody) throw new Error('Incomplete data from AI provider');
+    } catch (err) {
+      console.error('❌ All AI providers failed for june-report:', err.message);
+      ai = {
+        heroTitle: 'Great progress',
+        highlight1: `Saved $${saved.toFixed(0)} this month`,
+        highlight2: 'Stayed within budget',
+        highlight3: vsLastMonthPercent <= 0 ? 'Spending trending down' : 'Spending trending up',
+        insightBody: `You saved $${saved.toFixed(0)} out of $${income.toFixed(0)} in income this month. Keep the momentum going.`,
+      };
+    }
+
+    res.json({
+      title: 'Monthly Report', // consider deriving from current month name if reused across months
+      statusBadge: 'COMPLETED',
+      subtitle: `Here's how your money moved this month`,
+      heroTitle: ai.heroTitle,
+      spentValue: `$${expenses.toFixed(0)}`,
+      savedValue: `$${saved.toFixed(0)}`,
+      vsLastMonthValue: `${vsLastMonthPercent > 0 ? '+' : ''}${vsLastMonthPercent}%`,
+      categories,
+      chartMonths: chartMonths.length ? chartMonths : ['-', '-', '-', '-', '-', '-'],
+      chartSavings,
+      highlight1: ai.highlight1,
+      highlight2: ai.highlight2,
+      highlight3: ai.highlight3,
+      insightBody: ai.insightBody,
+    });
+  } catch (err) {
+    console.error(' REPORT ERROR:', err);
+    res.status(500).json({ error: err.message || 'Internal server error' });
+  }
+});
+
+
 // ══════════════════════════════════════════════════════════════════════════════
 //  HEALTH CHECK & ERROR HANDLING
 // ══════════════════════════════════════════════════════════════════════════════
