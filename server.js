@@ -3133,6 +3133,130 @@ Make everything specific and grounded in the real numbers.`.trim();
   }
 });
 
+
+app.get('/api/goal-impact', authenticate, async (req, res) => {
+  try {
+    const goals = await Goal.find({ userId: req.userId }).sort({ priority: -1 }).limit(1);
+    const profile = await Profile.findOne({ userId: req.userId });
+    if (!goals.length) return res.status(404).json({ error: 'No active goal found' });
+
+    const goal = goals[0];
+    const target = goal.targetAmount || 0;
+    const saved = goal.existingSavings || 0;
+    const monthly = goal.monthlyContribution || (profile ? (profile.primarySalary || 0) * 0.2 : 0);
+    const monthsLeft = target > saved ? Math.ceil((target - saved) / monthly) : 0;
+    const now = new Date();
+
+    // ── Compute projection lines (for chart) ──────────────────────────────────
+    const months = 24; // look ahead 24 months
+    const svgWidth = 300, svgHeight = 120;
+    const buildLine = (contribution) => {
+      const points = [];
+      let current = saved;
+      for (let m = 0; m <= months; m++) {
+        const x = (m / months) * svgWidth;
+        const progress = Math.min(current / target, 1);
+        const y = svgHeight - 10 - progress * (svgHeight - 20); // y=110 (bottom) at 0%, y=10 (top) at 100%
+        points.push([x, y]);
+        current = Math.min(current + contribution, target);
+      }
+      return points;
+    };
+
+    const currentLine = buildLine(monthly);
+    const optimisticLine = buildLine(monthly + 200);  // +200 / mo scenario
+    const conservativeLine = buildLine(Math.max(monthly - 200, 0)); // -200 / mo scenario
+
+    // ── AI generated text ────────────────────────────────────────────────────
+    const prompt = `
+You are a goal coach. Based on the user's real goal, generate a "Goal Impact" report.
+
+REAL DATA:
+- Goal: ${goal.name || goal.goalType}
+- Target: $${target.toFixed(0)}
+- Current savings: $${saved.toFixed(0)}
+- Monthly contribution: $${monthly.toFixed(0)}
+- Projected completion: ${monthsLeft} months from now (approx.)
+
+Output ONLY a JSON object with this exact structure:
+{
+  "title": "Goal Impact",
+  "subtitle": "How your decisions shape your future",
+  "dreamHomeTarget": "short goal name (max 3 words)",
+  "targetAmount": "$${target.toFixed(0)}",
+  "weeklySummaryTitle": "This Week's Impact",
+  "weeklySummaryText": "1 short sentence about the effect of this week's actions on the goal",
+  "decisionHighlightsTitle": "Decision Highlights",
+  "decisions": [
+    {
+      "title": "short decision title (max 5 words)",
+      "desc": "1 sentence description",
+      "impact": "e.g. +3 days",
+      "isPositive": true
+    },
+    {
+      "title": "another decision",
+      "desc": "description",
+      "impact": "e.g. -2 days",
+      "isPositive": false
+    },
+    {
+      "title": "third decision",
+      "desc": "description",
+      "impact": "e.g. +5 days",
+      "isPositive": true
+    }
+  ],
+  "insightBannerText": "1-2 sentence insight about small changes leading to big results"
+}
+Make all text specific to the goal and the numbers.`.trim();
+
+    let ai = {};
+    try {
+      const { text } = await callAI(prompt, null, true);
+      ai = extractJson(text);
+      if (!ai.decisions || !ai.insightBannerText) throw new Error('Incomplete AI');
+    } catch (err) {
+      console.error('AI fallback for goal-impact:', err.message);
+      ai = {
+        title: 'Goal Impact',
+        subtitle: 'How your decisions shape your future',
+        dreamHomeTarget: goal.name || goal.goalType,
+        targetAmount: `$${target.toFixed(0)}`,
+        weeklySummaryTitle: "This Week's Impact",
+        weeklySummaryText: `You moved ${monthly > 0 ? '+' : ''}$${monthly.toFixed(0)} closer to your goal.`,
+        decisionHighlightsTitle: 'Decision Highlights',
+        decisions: [
+          { title: 'Cooked at home', desc: 'Saved $40 by skipping takeout', impact: '+2 days', isPositive: true },
+          { title: 'Impulse buy', desc: 'Bought a gadget on sale', impact: '-1 day', isPositive: false },
+          { title: 'Extra shift', desc: 'Picked up a weekend gig', impact: '+5 days', isPositive: true },
+        ],
+        insightBannerText: 'Small daily choices add up to months of earlier freedom.'
+      };
+    }
+
+    res.json({
+      ...ai,
+      chartLines: {
+        current: currentLine,
+        optimistic: optimisticLine,
+        conservative: conservativeLine,
+      },
+      weeklySummaryTitle: ai.weeklySummaryTitle,
+      weeklySummaryText: ai.weeklySummaryText,
+      decisionHighlightsTitle: ai.decisionHighlightsTitle,
+      decisions: ai.decisions,
+    });
+  } catch (err) {
+    console.error('GOAL IMPACT ERROR:', err);
+    res.status(500).json({ error: err.message || 'Internal server error' });
+  }
+});
+
+
+
+
+
 // ══════════════════════════════════════════════════════════════════════════════
 //  HEALTH CHECK & ERROR HANDLING
 // ══════════════════════════════════════════════════════════════════════════════
