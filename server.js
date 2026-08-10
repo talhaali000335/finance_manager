@@ -3255,6 +3255,155 @@ Make all text specific to the goal and the numbers.`.trim();
 
 
 
+app.get('/api/habit-trends', authenticate, async (req, res) => {
+  try {
+    const profile = await Profile.findOne({ userId: req.userId });
+    const intents = await Intent.find({ userId: req.userId });
+    // Get monthly snapshots for last 6 months
+    const now = new Date();
+    const months = [];
+    for (let i = 5; i >= 0; i--) {
+      const d = new Date(now.getFullYear(), now.getMonth() - i, 1);
+      months.push({
+        key: `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`,
+        label: d.toLocaleString('default', { month: 'short' }),
+      });
+    }
+
+    const snapshots = await MonthlySnapshot.find({
+      userId: req.userId,
+      monthKey: { $in: months.map(m => m.key) }
+    });
+
+    const snapshotMap = {};
+    snapshots.forEach(s => { snapshotMap[s.monthKey] = s; });
+
+    // Compute savings (green) and impulse spending (yellow) per month
+    const impulseCategories = ['entertainment', 'food', 'shopping'];
+    const savingsData = [];
+    const impulseData = [];
+
+    months.forEach(month => {
+      const snap = snapshotMap[month.key];
+      const income = snap ? snap.income : (profile ? (profile.primarySalary || 0) + (profile.sideIncome || 0) : 0);
+      const expenses = snap ? snap.expenses : (profile ? (profile.rent || 0) + (profile.food || 0) + (profile.transport || 0) + (profile.entertainment || 0) + (profile.monthlyEMI || 0) : 0);
+      const savings = Math.max(income - expenses, 0);
+      savingsData.push(savings);
+
+      // Impulse spending from intents this month
+      const monthStart = new Date(now.getFullYear(), now.getMonth() - (5 - i), 1);
+      const monthEnd = new Date(monthStart.getFullYear(), monthStart.getMonth() + 1, 0, 23, 59, 59);
+      const impulseTotal = intents
+        .filter(intent => {
+          const created = new Date(intent.createdAt);
+          return created >= monthStart && created <= monthEnd && impulseCategories.includes(intent.category);
+        })
+        .reduce((sum, intent) => sum + intent.amount, 0);
+      impulseData.push(impulseTotal);
+    });
+
+    // Scale to viewBox 300x120
+    const maxSavings = Math.max(...savingsData, 1);
+    const minSavings = Math.min(...savingsData, 0);
+    const maxImpulse = Math.max(...impulseData, 1);
+    const minImpulse = Math.min(...impulseData, 0);
+
+    const mapToView = (value, min, max, lowY, highY) => {
+      if (max === min) return lowY;
+      const ratio = (value - min) / (max - min);
+      return lowY + ratio * (highY - lowY);
+    };
+
+    const greenPoints = savingsData.map((val, i) => {
+      const x = 10 + (280 / 5) * i;  // 10 to 290
+      const y = mapToView(val, minSavings, maxSavings, 95, 25); // inverted: higher savings -> lower y
+      return { x, y: Math.round(y) };
+    });
+
+    const yellowPoints = impulseData.map((val, i) => {
+      const x = 10 + (280 / 5) * i;
+      const y = mapToView(val, minImpulse, maxImpulse, 32, 100); // higher impulse -> higher y
+      return { x, y: Math.round(y) };
+    });
+
+    // AI prompt
+    const prompt = `
+You are a financial habit coach. Generate a "Habit Trends" report for the user based on their real data.
+
+REAL DATA:
+- Last 6 months savings (newest last): ${JSON.stringify(savingsData)}
+- Last 6 months impulse spending (newest last): ${JSON.stringify(impulseData)}
+- Current month label: ${months[months.length-1].label}
+
+Output ONLY a JSON object with this exact structure:
+{
+  "title": "Your Habit Trends",
+  "subtitle": "How your money habits are evolving",
+  "chartTitle": "Savings vs Impulse",
+  "chartRange": "Last 6 months",
+  "aiSummaryTitle": "AI Insight",
+  "aiSummaryText": "1-2 sentence insight about the trend, mentioning the biggest change",
+  "milestonesTitle": "Recent Milestones",
+  "milestones": [
+    {
+      "date": "short date like 'Apr 3'",
+      "title": "short milestone title",
+      "desc": "one sentence description",
+      "icon": "emoji_events"
+    },
+    {
+      "date": "short date",
+      "title": "title",
+      "desc": "description",
+      "icon": "local_fire_department"
+    },
+    {
+      "date": "short date",
+      "title": "title",
+      "desc": "description",
+      "icon": "add"
+    }
+  ],
+  "infoBannerText": "1 sentence about how habits are tracked"
+}`.trim();
+
+    let ai = {};
+    try {
+      const { text } = await callAI(prompt, null, true);
+      ai = extractJson(text);
+      if (!ai.title || !ai.milestones) throw new Error('Incomplete AI');
+    } catch (err) {
+      console.error('AI fallback for habit-trends:', err.message);
+      ai = {
+        title: 'Your Habit Trends',
+        subtitle: 'How your money habits are evolving',
+        chartTitle: 'Savings vs Impulse',
+        chartRange: 'Last 6 months',
+        aiSummaryTitle: 'AI Insight',
+        aiSummaryText: 'Your savings are steadily growing while impulse spending is declining.',
+        milestonesTitle: 'Recent Milestones',
+        milestones: [
+          { date: 'Apr 3', title: 'Saved First $1,000', desc: 'Reached your emergency fund milestone.', icon: 'emoji_events' },
+          { date: 'May 15', title: '50% Less Impulse Buys', desc: 'Significantly reduced unplanned spending.', icon: 'local_fire_department' },
+          { date: 'Jun 20', title: 'Invested in Growth', desc: 'Opened your first investment account.', icon: 'add' },
+        ],
+        infoBannerText: 'Habits are tracked using your actual spending and savings patterns over time.'
+      };
+    }
+
+    res.json({
+      ...ai,
+      greenPoints,
+      yellowPoints,
+      xLabels: months.map(m => m.label),
+    });
+  } catch (err) {
+    console.error('HABIT TRENDS ERROR:', err);
+    res.status(500).json({ error: err.message || 'Internal server error' });
+  }
+});
+
+
 
 
 // ══════════════════════════════════════════════════════════════════════════════
