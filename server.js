@@ -2537,6 +2537,151 @@ Make the timeline dates realistic (e.g., past months, current month, future). Th
 
 
 
+app.get('/api/your-future', authenticate, async (req, res) => {
+  try {
+    const profile = await Profile.findOne({ userId: req.userId });
+    const goals   = await Goal.find({ userId: req.userId }).sort({ priority: -1 }).limit(2);
+    if (!profile) return res.status(404).json({ error: 'Profile not found' });
+
+    const now = new Date();
+    const income = (profile.primarySalary || 0) + (profile.sideIncome || 0);
+
+    // Map goal data for AI
+    const goalData = goals.map(g => {
+      const target = g.targetAmount || 0;
+      const saved  = g.existingSavings || 0;
+      const monthsLeft = Math.max(Math.ceil((g.targetDate ? (new Date(g.targetDate) - now) / (1000*60*60*24*30) : 12)), 0);
+      const neededMonthly = monthsLeft > 0 ? (target - saved) / monthsLeft : target;
+      const affordability = income > 0 ? Math.min(neededMonthly / (income * 0.3), 1) : 0; // 30% of income
+      return {
+        name: g.name || g.goalType,
+        target,
+        saved,
+        monthsLeft,
+        monthlyContribution: g.monthlyContribution || 0,
+        autoTransfer: g.autoTransfer,
+        riskTolerance: g.riskTolerance || 'conservative',
+        affordability: affordability.toFixed(2)
+      };
+    });
+
+    const prompt = `
+You are a financial forecaster. Based on the user's real goals and financial data, generate a "Your Future" outlook.
+
+User data:
+- Monthly income: $${income.toFixed(0)}
+- Goals: ${JSON.stringify(goalData)}
+
+Output ONLY a JSON object with this exact structure:
+
+{
+  "title": "Your Future",
+  "subtitle": "Where your money is taking you",
+  "goals": [
+    {
+      "icon": "home",               // Material icon name (e.g., home, flight_takeoff, school, business_center)
+      "title": "short goal title",
+      "confidence": "High Confidence",
+      "confidenceBgColor": "0xFFD1FAE5",
+      "confidenceTextColor": "0xFF065F46",
+      "completion": "Mar 2026",
+      "completionExtra": "2 months early",   // optional, null if not applicable
+      "completionColor": "0xFF059669",
+      "insight": "AI-generated insight 1-2 sentences",
+      "insightBgColor": "0xFFD1FAE5",
+      "insightIconColor": "0xFF059669",
+      "insightIcon": "security"     // Material icon name for the insight line
+    },
+    // second goal if present, otherwise null
+  ],
+  "milestonesTitle": "Probability Milestones",
+  "milestones": [
+    {
+      "title": "short milestone title (max 8 words)",
+      "probability": "85%",
+      "progress": 0.85,
+      "color": "green"             // "green" or "gold"
+    },
+    {
+      "title": "second milestone",
+      "probability": "62%",
+      "progress": 0.62,
+      "color": "gold"
+    },
+    {
+      "title": "third milestone",
+      "probability": "45%",
+      "progress": 0.45,
+      "color": "gold"
+    }
+  ],
+  "overallInsight": "2-3 sentences overall AI insight",
+  "footerText": "short disclaimer like 'Based on current spending habits and market trends. Not financial advice.'"
+}
+
+Make the goal predictions realistic based on the affordability and savings rate. The milestones should be financial achievements (e.g., 'Emergency fund fully funded', 'Investment portfolio reaches $10k').
+Return ONLY the JSON.`.trim();
+
+    let future;
+    try {
+      const { text } = await callAI(prompt, null, true);
+      future = extractJson(text);
+      if (!future.title || !future.goals) throw new Error('Incomplete AI response');
+    } catch (err) {
+      console.error('❌ AI failed for your-future:', err.message);
+      // Fallback with reasonable defaults
+      future = {
+        title: 'Your Future',
+        subtitle: 'Where your money is taking you',
+        goals: [
+          {
+            icon: 'home',
+            title: goalData[0]?.name || 'Dream Home',
+            confidence: 'High Confidence',
+            confidenceBgColor: '0xFFD1FAE5',
+            confidenceTextColor: '0xFF065F46',
+            completion: 'Mar 2026',
+            completionExtra: 'on track',
+            completionColor: '0xFF059669',
+            insight: 'Based on your current savings rate, this goal is on track.',
+            insightBgColor: '0xFFD1FAE5',
+            insightIconColor: '0xFF059669',
+            insightIcon: 'security'
+          },
+          ...(goalData[1] ? [{
+            icon: 'flight_takeoff',
+            title: goalData[1].name || 'Vacation',
+            confidence: 'Moderate',
+            confidenceBgColor: '0xFFFEF3C7',
+            confidenceTextColor: '0xFFB45309',
+            completion: 'Sep 2025',
+            completionExtra: null,
+            completionColor: '0xFF1A1A2E',
+            insight: 'You may need to increase contributions slightly to stay on track.',
+            insightBgColor: '0xFFFEF3C7',
+            insightIconColor: '0xFFD97706',
+            insightIcon: 'warning'
+          }] : [])
+        ],
+        milestonesTitle: 'Probability Milestones',
+        milestones: [
+          { title: 'Emergency fund fully funded', probability: '85%', progress: 0.85, color: 'green' },
+          { title: 'Investment portfolio reaches $10k', probability: '62%', progress: 0.62, color: 'gold' },
+          { title: 'Debt-free by end of year', probability: '45%', progress: 0.45, color: 'gold' }
+        ],
+        overallInsight: 'You are building a solid financial foundation. Keep automating your savings for the best chance at achieving these milestones.',
+        footerText: 'Based on current spending habits and market trends. Not financial advice.'
+      };
+    }
+
+    res.json(future);
+  } catch (err) {
+    console.error('YOUR FUTURE ERROR:', err);
+    res.status(500).json({ error: err.message || 'Internal server error' });
+  }
+});
+
+
 
 
 // ══════════════════════════════════════════════════════════════════════════════
