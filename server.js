@@ -2181,6 +2181,89 @@ Output ONLY a JSON object with this exact structure, no extra commentary:
 });
 
 
+
+// Add this route to your server file (e.g., app.js)
+app.get('/api/june-story', authenticate, async (req, res) => {
+  try {
+    const profile = await Profile.findOne({ userId: req.userId });
+    const goals   = await Goal.find({ userId: req.userId });
+    if (!profile) return res.status(404).json({ error: 'Profile not found' });
+
+    const income   = (profile.primarySalary || 0) + (profile.sideIncome || 0);
+    const expenses = (profile.rent || 0) + (profile.food || 0) + (profile.transport || 0) + (profile.entertainment || 0) + (profile.monthlyEMI || 0);
+
+    const prompt = `
+You are a warm, encouraging financial coach writing a personalised "June Story" for a user.
+Use ONLY the real data below – never invent numbers.
+
+USER DATA:
+- Monthly income: $${income}
+- Monthly expenses: $${expenses}
+- Primary goal: ${goals.length ? `${goals[0].name || goals[0].goalType}, target $${goals[0].targetAmount}` : 'none set'}
+
+Output ONLY a JSON object with this exact structure, no extra commentary:
+{
+  "title": "Your June Story",
+  "subtitle": "A look back at your financial journey this month",
+  "heroQuote": "an inspiring short quote (4-6 words) that captures the month's theme",
+  "heroDescription": "1-2 sentences of heartfelt description about the user's progress",
+  "keyMoments": [
+    {
+      "icon": "chat_bubble_outline",
+      "iconBgColor": "0xFFE0F2FE",
+      "iconColor": "0xFF0284C7",
+      "title": "short highlight title (max 5 words)",
+      "date": "June 3"
+    },
+    {
+      "icon": "star",
+      "iconBgColor": "0xFFFEF3C7",
+      "iconColor": "0xFFD97706",
+      "title": "short highlight title (max 5 words)",
+      "date": "June 10"
+    },
+    {
+      "icon": "trending_up",
+      "iconBgColor": "0xFFD1FAE5",
+      "iconColor": "0xFF059669",
+      "title": "short highlight title (max 5 words)",
+      "date": "June 22"
+    }
+  ],
+  "themeSummary": "one sentence that summarises the month's financial theme",
+  "shareButtonText": "Share Your Story"
+}
+Generate exactly 3 key moments. The icons, colours, and dates should feel realistic and reflect the user's data.`.trim();
+
+    let story;
+    try {
+      const { text } = await callAI(prompt, null, true);
+      story = extractJson(text);
+      if (!story.heroQuote || !story.keyMoments) throw new Error('Incomplete AI response');
+    } catch (err) {
+      console.error('❌ AI failed for june-story:', err.message);
+      story = {
+        title: 'Your June Story',
+        subtitle: 'A look back at your financial journey this month',
+        heroQuote: 'Small steps, big dreams.',
+        heroDescription: `You managed your finances with care this month. Keep up the great momentum.`,
+        keyMoments: [
+          { icon: 'chat_bubble_outline', iconBgColor: '0xFFE0F2FE', iconColor: '0xFF0284C7', title: 'Budget check-in', date: 'June 3' },
+          { icon: 'star', iconBgColor: '0xFFFEF3C7', iconColor: '0xFFD97706', title: 'Saved extra $50', date: 'June 10' },
+          { icon: 'trending_up', iconBgColor: '0xFFD1FAE5', iconColor: '0xFF059669', title: 'Investment milestone', date: 'June 22' }
+        ],
+        themeSummary: 'A month of mindful spending and steady growth.',
+        shareButtonText: 'Share Your Story'
+      };
+    }
+
+    res.json(story);
+  } catch (err) {
+    console.error('JUNE STORY ERROR:', err);
+    res.status(500).json({ error: err.message || 'Internal server error' });
+  }
+});
+
 // ══════════════════════════════════════════════════════════════════════════════
 //  HEALTH CHECK & ERROR HANDLING
 // ══════════════════════════════════════════════════════════════════════════════
