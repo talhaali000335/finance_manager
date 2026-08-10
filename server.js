@@ -2682,6 +2682,164 @@ Return ONLY the JSON.`.trim();
 });
 
 
+
+
+
+
+
+app.get('/api/patterns', authenticate, async (req, res) => {
+  try {
+    const profile = await Profile.findOne({ userId: req.userId });
+    const intents = await Intent.find({ userId: req.userId });
+    if (!profile) return res.status(404).json({ error: 'Profile not found' });
+
+    const now = new Date();
+    const currentMonth = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`;
+    const prevMonth = new Date(now.getFullYear(), now.getMonth() - 1, 1);
+    const prevMonthKey = `${prevMonth.getFullYear()}-${String(prevMonth.getMonth() + 1).padStart(2, '0')}`;
+
+    // --- Daily spending averages (for weekend alert bars) ---
+    const days = ['Sun','Mon','Tue','Wed','Thu','Fri','Sat'];
+    const dayTotals = Object.fromEntries(days.map(d => [d, 0]));
+    const dayCounts = Object.fromEntries(days.map(d => [d, 0]));
+    intents.forEach(i => {
+      const d = days[new Date(i.createdAt).getDay()];
+      dayTotals[d] += i.amount;
+      dayCounts[d] += 1;
+    });
+    const dailyAvgs = days.map(d => dayCounts[d] ? dayTotals[d] / dayCounts[d] : 0);
+    const maxAvg = Math.max(...dailyAvgs, 1);
+    // Scale heights to 0–16 (matching the original UI scale)
+    const barData = days.map((d, i) => ({
+      day: d,
+      height: Math.round((dailyAvgs[i] / maxAvg) * 16),
+      color: dailyAvgs[i] === maxAvg ? '0xFFEF4444' : '0xFFE5E7EB',  // red for peak day
+    }));
+
+    // --- Category trends (Top 3 spending categories) ---
+    const catMap = { food: 'Food', transport: 'Transport', entertainment: 'Entertainment' };
+    // Calculate monthly spending per category from profile fields (simplified)
+    const catSpending = [
+      { key: 'food', label: 'Food', current: profile.food || 0 },
+      { key: 'transport', label: 'Transport', current: profile.transport || 0 },
+      { key: 'entertainment', label: 'Entertainment', current: profile.entertainment || 0 },
+    ];
+    // For previous month we don't have historical profile – we could use MonthlySnapshot? Let's approximate with intents.
+    const prevIntents = intents.filter(i => {
+      const d = new Date(i.createdAt);
+      return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}` === prevMonthKey;
+    });
+    const prevCatTotals = { food:0, transport:0, entertainment:0 };
+    prevIntents.forEach(i => {
+      if (catMap[i.category]) prevCatTotals[i.category] += i.amount;
+    });
+    const currIntents = intents.filter(i => {
+      const d = new Date(i.createdAt);
+      return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}` === currentMonth;
+    });
+    const currCatTotals = { food:0, transport:0, entertainment:0 };
+    currIntents.forEach(i => {
+      if (catMap[i.category]) currCatTotals[i.category] += i.amount;
+    });
+
+    const trendItems = catSpending.map(cat => {
+      const prev = prevCatTotals[cat.key] || cat.current * 0.9; // fallback
+      const curr = currCatTotals[cat.key] || cat.current;
+      const diff = prev > 0 ? ((curr - prev) / prev) * 100 : 0;
+      const isUp = diff > 5 ? true : (diff < -5 ? false : null); // null for flat
+      return {
+        title: cat.label,
+        trend: `${diff > 0 ? '+' : ''}${Math.round(diff)}% vs last month`,
+        isUp: isUp,
+        imageUrl: null,  // will be generated on frontend using category initial if needed
+      };
+    });
+
+    // --- Heatmap colours (daily intentionality) ---
+    // Normalize spending to a 0-1 scale and map to a colour gradient
+    const heatColors = days.map((d, i) => {
+      const ratio = maxAvg > 0 ? dailyAvgs[i] / maxAvg : 0;
+      // interpolate between teal (low) and red (high)
+      const r = Math.round(239 * ratio);
+      const g = Math.round(68 + (187 * (1 - ratio)));
+      const b = Math.round(68 + (187 * (1 - ratio)));
+      return {
+        day: d,
+        color: `0xFF${r.toRadixString(16).padStart(2, '0')}${g.toRadixString(16).padStart(2, '0')}${b.toRadixString(16).padStart(2, '0')}`,
+      };
+    });
+
+    // --- AI generated text ---
+    const prompt = `
+You are a financial behaviour coach. Based on the user's real data below, generate the content for a "Your Patterns" screen.
+
+REAL DATA:
+- Daily spending (normalized heights 0-16, day with height 16 is the peak): ${JSON.stringify(barData.map(b => ({ day: b.day, height: b.height })))}
+- Category trends this month vs last: ${JSON.stringify(trendItems.map(t => ({ title: t.title, trend: t.trend, isUp: t.isUp })))}
+- Heatmap (peak day is the darkest color): ${JSON.stringify(heatColors.map(h => ({ day: h.day, ratio: (parseInt(h.color.slice(4,6),16)/239).toFixed(2) })))}
+
+Output ONLY a JSON object with this exact structure:
+{
+  "title": "Your Patterns",
+  "subtitle": "short subtitle like 'Money moves in cycles'",
+  "weekendAlert": {
+    "title": "Weekend Alert",
+    "badge": "High Spike",
+    "description": "1 sentence describing the weekend spending spike, mentioning the peak day if applicable"
+  },
+  "trendingTitle": "Trending",
+  "nudge": {
+    "text": "a short, encouraging nudge to improve habits (max 10 words)"
+  },
+  "heatmap": {
+    "title": "Intentionality Heatmap",
+    "description": "1 sentence explaining what the heatmap shows"
+  }
+}
+Use the real numbers to make the text specific.`.trim();
+
+    let ai = {};
+    try {
+      const { text } = await callAI(prompt, null, true);
+      ai = extractJson(text);
+      if (!ai.title) throw new Error('Incomplete AI');
+    } catch (err) {
+      console.error('AI fallback for patterns:', err.message);
+      ai = {
+        title: 'Your Patterns',
+        subtitle: 'Money moves in cycles',
+        weekendAlert: { title: 'Weekend Alert', badge: 'High Spike', description: 'Your spending peaks on Saturdays.' },
+        trendingTitle: 'Trending',
+        nudge: { text: 'Keep an eye on weekend spending – small changes add up.' },
+        heatmap: { title: 'Intentionality Heatmap', description: 'Darker days mean higher spending.' }
+      };
+    }
+
+    res.json({
+      title: ai.title,
+      subtitle: ai.subtitle,
+      weekendAlert: {
+        ...ai.weekendAlert,
+        bars: barData,               // the computed bar chart data
+      },
+      trendingTitle: ai.trendingTitle,
+      trendItems,
+      nudge: ai.nudge,
+      heatmap: {
+        ...ai.heatmap,
+        days: heatColors,            // the computed heatmap colours
+      },
+    });
+  } catch (err) {
+    console.error('PATTERNS ENDPOINT ERROR:', err);
+    res.status(500).json({ error: err.message || 'Internal server error' });
+  }
+});
+
+
+
+
+
 app.get('/api/your-patterns', authenticate, async (req, res) => {
   try {
     const profile = await Profile.findOne({ userId: req.userId });
@@ -2813,6 +2971,12 @@ Use the real data to make the text specific. The chartBars array must be exactly
     res.status(500).json({ error: err.message || 'Internal server error' });
   }
 });
+
+
+
+
+
+
 
 // ══════════════════════════════════════════════════════════════════════════════
 //  HEALTH CHECK & ERROR HANDLING
