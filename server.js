@@ -2973,6 +2973,92 @@ Use the real data to make the text specific. The chartBars array must be exactly
 
 
 
+app.get('/api/spending-dna', authenticate, async (req, res) => {
+  try {
+    const intents = await Intent.find({ userId: req.userId });
+    if (!intents.length) {
+      // No data: return default generic habits
+      return res.json({
+        habits: [
+          { title: 'Morning Coffee', description: 'Your daily latte adds up.', icon: 'coffee', iconBgColor: '0xFFE0F2F1', iconColor: '0xFF1C886F' },
+          { title: 'Impulse Buys', description: 'Small purchases you barely remember.', icon: 'shopping_basket', iconBgColor: '0xFFFFF8E1', iconColor: '0xFFF4A22E' },
+          { title: 'Subscription Creep', description: 'Forgotten subscriptions draining your wallet.', icon: 'lightbulb_outline', iconBgColor: '0xFFFFEBEE', iconColor: '0xFFEF5350' },
+        ]
+      });
+    }
+
+    // Aggregate spending by category
+    const catTotals = {};
+    intents.forEach(i => {
+      const cat = i.category || 'other';
+      catTotals[cat] = (catTotals[cat] || 0) + i.amount;
+    });
+
+    // Sort categories by total spending
+    const sorted = Object.entries(catTotals).sort((a, b) => b[1] - a[1]);
+    const topCategories = sorted.slice(0, 3).map(([cat, total]) => ({ category: cat, total }));
+
+    const prompt = `
+You are a financial behaviour analyst. Based on the user's top spending categories, generate three "Spending DNA" habits that describe their unique money personality.
+
+Top spending categories (by total amount):
+${JSON.stringify(topCategories)}
+
+For each habit, provide:
+- "title": a short, catchy habit name (max 4 words)
+- "description": a one-sentence description (max 12 words)
+- "icon": a Material icon name from this list: coffee, shopping_basket, lightbulb_outline, restaurant, flight_takeoff, directions_car, local_grocery_store, fitness_center, pets, movie, shopping_cart, card_giftcard, receipt, account_balance, camera, music_note, sports_esports, videogame_asset, computer, phone_android, watch, diamond, favorite, star, bolt, warning, check_circle, cloud, umbrella, wb_sunny, nightlight, local_bar, fastfood, icecream, cake, local_pizza, brunch_dining, delivery_dining, ramen_dining, set_meal, bakery_dining, breakfast_dining, lunch_dining, dinner_dining, takeout_dining, local_cafe, local_dining
+- "iconBgColor": a hex color string like "0xFFE0F2F1" (light pastel background)
+- "iconColor": a hex color string like "0xFF1C886F" (vibrant, matching the category emotion)
+
+Output ONLY a JSON object with this exact structure:
+{
+  "habits": [
+    {
+      "title": "...",
+      "description": "...",
+      "icon": "...",
+      "iconBgColor": "0xFF...",
+      "iconColor": "0xFF..."
+    },
+    // two more habits
+  ]
+}
+Make the habits feel personal and grounded in the real data.`.trim();
+
+    let dna = {};
+    try {
+      const { text } = await callAI(prompt, null, true);
+      dna = extractJson(text);
+      if (!dna.habits || dna.habits.length < 3) throw new Error('Incomplete AI response');
+    } catch (err) {
+      console.error('AI fallback for spending-dna:', err.message);
+      // Fallback using real categories
+      const fallbackIcons = ['coffee', 'shopping_basket', 'lightbulb_outline'];
+      const fallbackColors = [
+        { bg: '0xFFE0F2F1', fg: '0xFF1C886F' },
+        { bg: '0xFFFFF8E1', fg: '0xFFF4A22E' },
+        { bg: '0xFFFFEBEE', fg: '0xFFEF5350' },
+      ];
+      dna = {
+        habits: topCategories.map((cat, i) => ({
+          title: cat.category.charAt(0).toUpperCase() + cat.category.slice(1),
+          description: `Total spent: $${cat.total.toFixed(0)}`,
+          icon: fallbackIcons[i % fallbackIcons.length],
+          iconBgColor: fallbackColors[i % fallbackColors.length].bg,
+          iconColor: fallbackColors[i % fallbackColors.length].fg,
+        }))
+      };
+    }
+
+    res.json(dna);
+  } catch (err) {
+    console.error('SPENDING DNA ERROR:', err);
+    res.status(500).json({ error: err.message || 'Internal server error' });
+  }
+});
+
+
 
 
 
