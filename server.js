@@ -2972,93 +2972,163 @@ Use the real data to make the text specific. The chartBars array must be exactly
 
 
 
-
 app.get('/api/spending-dna', authenticate, async (req, res) => {
   try {
     const intents = await Intent.find({ userId: req.userId });
-    if (!intents.length) {
-      // No data: return default generic habits
-      return res.json({
-        habits: [
-          { title: 'Morning Coffee', description: 'Your daily latte adds up.', icon: 'coffee', iconBgColor: '0xFFE0F2F1', iconColor: '0xFF1C886F' },
-          { title: 'Impulse Buys', description: 'Small purchases you barely remember.', icon: 'shopping_basket', iconBgColor: '0xFFFFF8E1', iconColor: '0xFFF4A22E' },
-          { title: 'Subscription Creep', description: 'Forgotten subscriptions draining your wallet.', icon: 'lightbulb_outline', iconBgColor: '0xFFFFEBEE', iconColor: '0xFFEF5350' },
-        ]
-      });
+    const now = new Date();
+
+    // ── Habits (same as before) ──────────────────────────────────────────────
+    const catTotals = {};
+    intents.forEach(i => { catTotals[i.category || 'other'] = (catTotals[i.category || 'other'] || 0) + i.amount; });
+    const sortedCats = Object.entries(catTotals).sort((a, b) => b[1] - a[1]).slice(0, 3);
+
+    // ── Heatmap (4 weeks x 7 days) ──────────────────────────────────────────
+    const daysOfWeek = ['Sun','Mon','Tue','Wed','Thu','Fri','Sat'];
+    // Determine start of current week (Sunday)
+    const startOfWeek = new Date(now);
+    startOfWeek.setDate(now.getDate() - now.getDay());
+    startOfWeek.setHours(0,0,0,0);
+
+    // Build a 4x7 array (4 weeks back from current week)
+    const heatmap = [];
+    for (let w = 0; w < 4; w++) {
+      const weekStart = new Date(startOfWeek);
+      weekStart.setDate(weekStart.getDate() - w * 7);
+      const row = [];
+      for (let d = 0; d < 7; d++) {
+        const dayStart = new Date(weekStart);
+        dayStart.setDate(dayStart.getDate() + d);
+        const dayEnd = new Date(dayStart);
+        dayEnd.setDate(dayEnd.getDate() + 1);
+        const total = intents
+          .filter(i => i.createdAt >= dayStart && i.createdAt < dayEnd)
+          .reduce((sum, i) => sum + i.amount, 0);
+        row.push({ amount: total, date: dayStart });
+      }
+      heatmap.push(row);
     }
 
-    // Aggregate spending by category
-    const catTotals = {};
-    intents.forEach(i => {
-      const cat = i.category || 'other';
-      catTotals[cat] = (catTotals[cat] || 0) + i.amount;
-    });
+    // Find global max for normalisation
+    const allAmounts = heatmap.flat().map(cell => cell.amount);
+    const maxAmount = Math.max(...allAmounts, 1);
 
-    // Sort categories by total spending
-    const sorted = Object.entries(catTotals).sort((a, b) => b[1] - a[1]);
-    const topCategories = sorted.slice(0, 3).map(([cat, total]) => ({ category: cat, total }));
+    // Convert amounts to colour strings (from white -> light yellow -> deep yellow)
+    const getHeatColor = (amount) => {
+      const ratio = amount / maxAmount;
+      const r = 255;
+      const g = Math.round(255 - (130 * ratio));  // 255 -> 125
+      const b = Math.round(255 - (200 * ratio));  // 255 -> 55
+      return `0xFF${r.toRadixString(16).padStart(2, '0')}${g.toRadixString(16).padStart(2, '0')}${b.toRadixString(16).padStart(2, '0')}`;
+    };
 
+    const heatmapGrid = heatmap.map(row =>
+      row.map(cell => getHeatColor(cell.amount))
+    );
+
+    // ── Velocity (this week vs last week) ────────────────────────────────────
+    const thisWeekStart = new Date(startOfWeek);
+    const lastWeekStart = new Date(startOfWeek);
+    lastWeekStart.setDate(lastWeekStart.getDate() - 7);
+
+    const thisWeekTotal = intents
+      .filter(i => i.createdAt >= thisWeekStart)
+      .reduce((sum, i) => sum + i.amount, 0);
+    const lastWeekTotal = intents
+      .filter(i => i.createdAt >= lastWeekStart && i.createdAt < thisWeekStart)
+      .reduce((sum, i) => sum + i.amount, 0);
+
+    const avgWeeklySpend = lastWeekTotal > 0 ? lastWeekTotal : 1; // fallback
+    const thisWeekProgress = Math.min(thisWeekTotal / avgWeeklySpend, 1.0);
+    const lastWeekProgress = 1.0; // reference
+    const velocityPercent = lastWeekTotal > 0
+      ? Math.round(((thisWeekTotal - lastWeekTotal) / lastWeekTotal) * 100)
+      : 0;
+
+    // ── AI Prompt (includes all computed data) ──────────────────────────────
     const prompt = `
-You are a financial behaviour analyst. Based on the user's top spending categories, generate three "Spending DNA" habits that describe their unique money personality.
+You are a financial behaviour analyst. Generate a complete Spending DNA report.
 
-Top spending categories (by total amount):
-${JSON.stringify(topCategories)}
-
-For each habit, provide:
-- "title": a short, catchy habit name (max 4 words)
-- "description": a one-sentence description (max 12 words)
-- "icon": a Material icon name from this list: coffee, shopping_basket, lightbulb_outline, restaurant, flight_takeoff, directions_car, local_grocery_store, fitness_center, pets, movie, shopping_cart, card_giftcard, receipt, account_balance, camera, music_note, sports_esports, videogame_asset, computer, phone_android, watch, diamond, favorite, star, bolt, warning, check_circle, cloud, umbrella, wb_sunny, nightlight, local_bar, fastfood, icecream, cake, local_pizza, brunch_dining, delivery_dining, ramen_dining, set_meal, bakery_dining, breakfast_dining, lunch_dining, dinner_dining, takeout_dining, local_cafe, local_dining
-- "iconBgColor": a hex color string like "0xFFE0F2F1" (light pastel background)
-- "iconColor": a hex color string like "0xFF1C886F" (vibrant, matching the category emotion)
+REAL DATA:
+- Top categories: ${JSON.stringify(sortedCats)}
+- Weekly velocity: this week $${thisWeekTotal.toFixed(2)} vs last week $${lastWeekTotal.toFixed(2)} (${velocityPercent}% change)
+- Heatmap (4 weeks x 7 days, values normalised): ${JSON.stringify(heatmap.map(row => row.map(c => c.amount.toFixed(2))))}
 
 Output ONLY a JSON object with this exact structure:
+
 {
+  "title": "Your Spending DNA",
+  "subtitle": "The patterns that shape your wallet",
+  "habitsHeader": "Recurring Habits",
+  "heatmapHeader": "Spending Heatmap",
+  "heatmapInsight": "1 sentence about what the heatmap shows (mention peak days/weeks)",
+  "velocityHeader": "Weekly Spending Velocity",
+  "velocityPercent": "${velocityPercent > 0 ? '+' : ''}${velocityPercent}%",
+  "velocityLabel": "vs last week",
+  "lastWeekLabel": "Last Week",
+  "thisWeekLabel": "This Week",
+  "mindfulInsight": "A 2-3 sentence mindful insight about the user's spending patterns",
   "habits": [
     {
-      "title": "...",
-      "description": "...",
-      "icon": "...",
-      "iconBgColor": "0xFF...",
-      "iconColor": "0xFF..."
+      "title": "short habit name (max 4 words)",
+      "description": "1 sentence description grounded in the real category",
+      "icon": "Material icon name (coffee, shopping_basket, etc.)",
+      "iconBgColor": "0xFFE0F2F1",
+      "iconColor": "0xFF1C886F"
     },
-    // two more habits
+    ... (3 habits)
   ]
 }
-Make the habits feel personal and grounded in the real data.`.trim();
 
-    let dna = {};
+Make everything specific and grounded in the real numbers.`.trim();
+
+    let ai = {};
     try {
       const { text } = await callAI(prompt, null, true);
-      dna = extractJson(text);
-      if (!dna.habits || dna.habits.length < 3) throw new Error('Incomplete AI response');
+      ai = extractJson(text);
+      if (!ai.habits || !ai.heatmapInsight) throw new Error('Incomplete AI');
     } catch (err) {
       console.error('AI fallback for spending-dna:', err.message);
-      // Fallback using real categories
       const fallbackIcons = ['coffee', 'shopping_basket', 'lightbulb_outline'];
       const fallbackColors = [
         { bg: '0xFFE0F2F1', fg: '0xFF1C886F' },
         { bg: '0xFFFFF8E1', fg: '0xFFF4A22E' },
         { bg: '0xFFFFEBEE', fg: '0xFFEF5350' },
       ];
-      dna = {
-        habits: topCategories.map((cat, i) => ({
-          title: cat.category.charAt(0).toUpperCase() + cat.category.slice(1),
-          description: `Total spent: $${cat.total.toFixed(0)}`,
-          icon: fallbackIcons[i % fallbackIcons.length],
-          iconBgColor: fallbackColors[i % fallbackColors.length].bg,
-          iconColor: fallbackColors[i % fallbackColors.length].fg,
+      ai = {
+        title: 'Your Spending DNA',
+        subtitle: 'The patterns that shape your wallet',
+        habitsHeader: 'Recurring Habits',
+        heatmapHeader: 'Spending Heatmap',
+        heatmapInsight: 'Weekends are your highest spending days.',
+        velocityHeader: 'Weekly Spending Velocity',
+        velocityPercent: `${velocityPercent > 0 ? '+' : ''}${velocityPercent}%`,
+        velocityLabel: 'vs last week',
+        lastWeekLabel: 'Last Week',
+        thisWeekLabel: 'This Week',
+        mindfulInsight: 'Your weekend spending tends to spike. Try setting a small Saturday budget.',
+        habits: sortedCats.map((cat, i) => ({
+          title: cat[0].charAt(0).toUpperCase() + cat[0].slice(1),
+          description: `You've spent $${cat[1].toFixed(0)} in this category.`,
+          icon: fallbackIcons[i],
+          iconBgColor: fallbackColors[i].bg,
+          iconColor: fallbackColors[i].fg,
         }))
       };
     }
 
-    res.json(dna);
+    // Add the computed heatmap and velocity to the response
+    res.json({
+      ...ai,
+      heatmapGrid,                 // 4x7 array of colour strings
+      velocityLastWeekProgress: lastWeekProgress,
+      velocityThisWeekProgress: thisWeekProgress,
+      velocityPercent: ai.velocityPercent,
+    });
   } catch (err) {
     console.error('SPENDING DNA ERROR:', err);
     res.status(500).json({ error: err.message || 'Internal server error' });
   }
 });
-
-
 
 
 
