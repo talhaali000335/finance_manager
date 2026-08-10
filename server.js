@@ -2977,19 +2977,22 @@ app.get('/api/spending-dna', authenticate, async (req, res) => {
     const intents = await Intent.find({ userId: req.userId });
     const now = new Date();
 
-    // ── Habits (same as before) ──────────────────────────────────────────────
+    // ── Habits (top 3 categories) ──────────────────────────────────────────
     const catTotals = {};
-    intents.forEach(i => { catTotals[i.category || 'other'] = (catTotals[i.category || 'other'] || 0) + i.amount; });
-    const sortedCats = Object.entries(catTotals).sort((a, b) => b[1] - a[1]).slice(0, 3);
+    intents.forEach(i => {
+      const cat = i.category || 'other';
+      catTotals[cat] = (catTotals[cat] || 0) + i.amount;
+    });
+    const sortedCats = Object.entries(catTotals)
+      .sort((a, b) => b[1] - a[1])
+      .slice(0, 3);
 
-    // ── Heatmap (4 weeks x 7 days) ──────────────────────────────────────────
+    // ── Heatmap (4 weeks x 7 days) ─────────────────────────────────────────
     const daysOfWeek = ['Sun','Mon','Tue','Wed','Thu','Fri','Sat'];
-    // Determine start of current week (Sunday)
     const startOfWeek = new Date(now);
     startOfWeek.setDate(now.getDate() - now.getDay());
     startOfWeek.setHours(0,0,0,0);
 
-    // Build a 4x7 array (4 weeks back from current week)
     const heatmap = [];
     for (let w = 0; w < 4; w++) {
       const weekStart = new Date(startOfWeek);
@@ -3008,24 +3011,24 @@ app.get('/api/spending-dna', authenticate, async (req, res) => {
       heatmap.push(row);
     }
 
-    // Find global max for normalisation
     const allAmounts = heatmap.flat().map(cell => cell.amount);
     const maxAmount = Math.max(...allAmounts, 1);
 
-    // Convert amounts to colour strings (from white -> light yellow -> deep yellow)
+    // Correctly convert amount to hex colour string
     const getHeatColor = (amount) => {
       const ratio = amount / maxAmount;
       const r = 255;
-      const g = Math.round(255 - (130 * ratio));  // 255 -> 125
-      const b = Math.round(255 - (200 * ratio));  // 255 -> 55
-      return `0xFF${r.toRadixString(16).padStart(2, '0')}${g.toRadixString(16).padStart(2, '0')}${b.toRadixString(16).padStart(2, '0')}`;
+      const g = Math.round(255 - (130 * ratio));
+      const b = Math.round(255 - (200 * ratio));
+      // Use toString(16) – JavaScript’s radix conversion
+      return `0xFF${r.toString(16).padStart(2, '0')}${g.toString(16).padStart(2, '0')}${b.toString(16).padStart(2, '0')}`;
     };
 
     const heatmapGrid = heatmap.map(row =>
       row.map(cell => getHeatColor(cell.amount))
     );
 
-    // ── Velocity (this week vs last week) ────────────────────────────────────
+    // ── Velocity (this week vs last week) ─────────────────────────────────
     const thisWeekStart = new Date(startOfWeek);
     const lastWeekStart = new Date(startOfWeek);
     lastWeekStart.setDate(lastWeekStart.getDate() - 7);
@@ -3037,14 +3040,14 @@ app.get('/api/spending-dna', authenticate, async (req, res) => {
       .filter(i => i.createdAt >= lastWeekStart && i.createdAt < thisWeekStart)
       .reduce((sum, i) => sum + i.amount, 0);
 
-    const avgWeeklySpend = lastWeekTotal > 0 ? lastWeekTotal : 1; // fallback
+    const avgWeeklySpend = lastWeekTotal > 0 ? lastWeekTotal : 1;
     const thisWeekProgress = Math.min(thisWeekTotal / avgWeeklySpend, 1.0);
-    const lastWeekProgress = 1.0; // reference
+    const lastWeekProgress = 1.0;
     const velocityPercent = lastWeekTotal > 0
       ? Math.round(((thisWeekTotal - lastWeekTotal) / lastWeekTotal) * 100)
       : 0;
 
-    // ── AI Prompt (includes all computed data) ──────────────────────────────
+    // ── AI Prompt ──────────────────────────────────────────────────────────
     const prompt = `
 You are a financial behaviour analyst. Generate a complete Spending DNA report.
 
@@ -3074,8 +3077,8 @@ Output ONLY a JSON object with this exact structure:
       "icon": "Material icon name (coffee, shopping_basket, etc.)",
       "iconBgColor": "0xFFE0F2F1",
       "iconColor": "0xFF1C886F"
-    },
-    ... (3 habits)
+    }
+    // exactly 3 habits
   ]
 }
 
@@ -3109,17 +3112,17 @@ Make everything specific and grounded in the real numbers.`.trim();
         habits: sortedCats.map((cat, i) => ({
           title: cat[0].charAt(0).toUpperCase() + cat[0].slice(1),
           description: `You've spent $${cat[1].toFixed(0)} in this category.`,
-          icon: fallbackIcons[i],
-          iconBgColor: fallbackColors[i].bg,
-          iconColor: fallbackColors[i].fg,
+          icon: fallbackIcons[i % fallbackIcons.length],
+          iconBgColor: fallbackColors[i % fallbackColors.length].bg,
+          iconColor: fallbackColors[i % fallbackColors.length].fg,
         }))
       };
     }
 
-    // Add the computed heatmap and velocity to the response
+    // Combine everything
     res.json({
       ...ai,
-      heatmapGrid,                 // 4x7 array of colour strings
+      heatmapGrid,
       velocityLastWeekProgress: lastWeekProgress,
       velocityThisWeekProgress: thisWeekProgress,
       velocityPercent: ai.velocityPercent,
@@ -3129,8 +3132,6 @@ Make everything specific and grounded in the real numbers.`.trim();
     res.status(500).json({ error: err.message || 'Internal server error' });
   }
 });
-
-
 
 // ══════════════════════════════════════════════════════════════════════════════
 //  HEALTH CHECK & ERROR HANDLING
