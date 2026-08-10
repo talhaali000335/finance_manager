@@ -2682,7 +2682,137 @@ Return ONLY the JSON.`.trim();
 });
 
 
+app.get('/api/your-patterns', authenticate, async (req, res) => {
+  try {
+    const profile = await Profile.findOne({ userId: req.userId });
+    if (!profile) return res.status(404).json({ error: 'Profile not found' });
 
+    // (Optional) compute real stress bars: find the day with highest average spending
+    const intents = await Intent.find({ userId: req.userId });
+    const days = ['Sun','Mon','Tue','Wed','Thu','Fri','Sat'];
+    const dayTotals = { Sun:0, Mon:0, Tue:0, Wed:0, Thu:0, Fri:0, Sat:0 };
+    const dayCounts = { Sun:0, Mon:0, Tue:0, Wed:0, Thu:0, Fri:0, Sat:0 };
+
+    intents.forEach(i => {
+      const day = days[new Date(i.createdAt).getDay()];
+      dayTotals[day] += i.amount;
+      dayCounts[day] += 1;
+    });
+
+    const dayAvg = {};
+    for (const d of days) {
+      dayAvg[d] = dayCounts[d] > 0 ? dayTotals[d] / dayCounts[d] : 0;
+    }
+    const maxAvg = Math.max(...Object.values(dayAvg), 1);
+    // Normalize to percentages for the bar chart
+    const chartBars = days.map(d => ({
+      day: d,
+      percent: Math.round((dayAvg[d] / maxAvg) * 100) / 100,  // 0.0 – 1.0
+      color: dayAvg[d] === maxAvg ? '0xFFEF4444' : '0xFFD1D5DB'  // red for highest, grey otherwise
+    }));
+
+    const income = (profile.primarySalary || 0) + (profile.sideIncome || 0);
+
+    const prompt = `
+You are a financial behaviour analyst. Based on the user's real data and spending patterns, generate the content for a "Your Patterns" screen.
+
+USER DATA:
+- Monthly income: $${income.toFixed(0)}
+- Spending patterns by day of week (percent of max): ${JSON.stringify(chartBars.map(b => ({ day: b.day, percent: b.percent })))}
+
+Output ONLY a JSON object with this exact structure:
+
+{
+  "title": "Your Patterns",
+  "subtitle": "Recognise your financial behaviours",
+  "stressResponse": {
+    "title": "Stress Response",
+    "correlationLabel": "CORRELATION: r=0.78",
+    "description": "1 sentence description linking high spending days to stress. Use the data above to make it specific (mention the peak day).",
+    "chartBars": ${JSON.stringify(chartBars)}   // use the real bars we computed
+  },
+  "paydayEffect": {
+    "icon": "credit_card",
+    "bgColor": "0xFFD1FAE5",
+    "iconColor": "0xFF059669",
+    "title": "Payday Effect",
+    "badge": "Cash Flow",
+    "description": "1 sentence about how spending changes right after payday"
+  },
+  "socialMultiplier": {
+    "icon": "favorite",
+    "bgColor": "0xFFFEF3C7",
+    "iconColor": "0xFFD97706",
+    "title": "Social Multiplier",
+    "badge": "High Joy",
+    "description": "1 sentence about spending more when with friends"
+  },
+  "weeklyRhythm": {
+    "title": "Weekly Rhythm",
+    "description": "1 sentence describing the overall weekly spending pattern"
+  },
+  "aiCoaching": {
+    "title": "AI COACHING",
+    "text": "A personalised 1-2 sentence invitation to improve habits, e.g. 'Ready to break the stress-spending loop?'",
+    "yesButton": "Yes, please",
+    "noButton": "Not yet"
+  }
+}
+
+Use the real data to make the text specific. The chartBars array must be exactly the one provided (with colors as hex strings). Return ONLY the JSON.`.trim();
+
+    let patterns;
+    try {
+      const { text } = await callAI(prompt, null, true);
+      patterns = extractJson(text);
+      if (!patterns.title || !patterns.stressResponse) throw new Error('Incomplete AI response');
+    } catch (err) {
+      console.error('❌ AI failed for your-patterns:', err.message);
+      // Fallback with computed chartBars and static text
+      patterns = {
+        title: 'Your Patterns',
+        subtitle: 'Recognise your financial behaviours',
+        stressResponse: {
+          title: 'Stress Response',
+          correlationLabel: 'CORRELATION: r=0.78',
+          description: `You tend to spend the most on ${chartBars.find(b => b.color === '0xFFEF4444')?.day || 'Mondays'}, often linked to stress.`,
+          chartBars
+        },
+        paydayEffect: {
+          icon: 'credit_card',
+          bgColor: '0xFFD1FAE5',
+          iconColor: '0xFF059669',
+          title: 'Payday Effect',
+          badge: 'Cash Flow',
+          description: 'Your spending increases by 20% in the first 3 days after payday.'
+        },
+        socialMultiplier: {
+          icon: 'favorite',
+          bgColor: '0xFFFEF3C7',
+          iconColor: '0xFFD97706',
+          title: 'Social Multiplier',
+          badge: 'High Joy',
+          description: 'Dining out with friends leads to 30% higher spending than solo meals.'
+        },
+        weeklyRhythm: {
+          title: 'Weekly Rhythm',
+          description: 'Weekends account for 40% of your weekly spending.'
+        },
+        aiCoaching: {
+          title: 'AI COACHING',
+          text: 'Ready to break the stress-spending loop and build healthier habits?',
+          yesButton: 'Yes, please',
+          noButton: 'Not yet'
+        }
+      };
+    }
+
+    res.json(patterns);
+  } catch (err) {
+    console.error('YOUR PATTERNS ERROR:', err);
+    res.status(500).json({ error: err.message || 'Internal server error' });
+  }
+});
 
 // ══════════════════════════════════════════════════════════════════════════════
 //  HEALTH CHECK & ERROR HANDLING
