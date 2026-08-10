@@ -1984,6 +1984,90 @@ Output ONLY the sentence, no extra text.
   }
 });
 
+
+app.get('/api/insights/overview', authenticate, async (req, res) => {
+  try {
+    const profile = await Profile.findOne({ userId: req.userId });
+    const goals   = await Goal.find({ userId: req.userId });
+    if (!profile) return res.status(404).json({ error: 'Profile not found' });
+
+    const income   = (profile.primarySalary || 0) + (profile.sideIncome || 0);
+    const expenses = (profile.rent || 0) + (profile.food || 0) + (profile.transport || 0) + (profile.entertainment || 0) + (profile.monthlyEMI || 0);
+    const savings  = Math.max(income - expenses, 0);
+    const savingsRate = income > 0 ? Math.round((savings / income) * 100) : 0;
+
+    const now = new Date();
+    const currentMonthKey = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`;
+    const snapshots = await MonthlySnapshot.find({ userId: req.userId }).sort({ monthKey: -1 }).limit(6);
+    const orderedSnapshots = snapshots.reverse();
+    const monthlySavings = orderedSnapshots.map(s => Math.max(s.income - s.expenses, 0));
+
+    const intents = await Intent.find({ userId: req.userId }).sort({ createdAt: -1 }).limit(100);
+    const categoryTotals = {};
+    for (const i of intents) {
+      categoryTotals[i.category] = (categoryTotals[i.category] || 0) + i.amount;
+    }
+    const topCategory = Object.entries(categoryTotals).sort((a, b) => b[1] - a[1])[0];
+
+    const dayTotals = {};
+    for (const i of intents) {
+      const day = new Date(i.createdAt).toLocaleDateString('en-US', { weekday: 'long' });
+      dayTotals[day] = (dayTotals[day] || 0) + i.amount;
+    }
+    const lowestSpendDay = Object.entries(dayTotals).sort((a, b) => a[1] - b[1])[0];
+
+    const primaryGoal = goals.sort((a, b) => (b.priority || 0) - (a.priority || 0))[0];
+
+    const prompt = `You are a behavior-focused financial coach. Based on this user's real data, generate two short behavior-pattern insights for a dashboard.
+Never invent numbers – use only the real data provided.
+
+USER DATA:
+- Monthly income: $${income}
+- Monthly expenses: $${expenses}
+- Savings rate: ${savingsRate}%
+- Top spending category: ${topCategory ? `${topCategory[0]} ($${topCategory[1].toFixed(2)})` : 'none yet'}
+- Lowest-spend day of week: ${lowestSpendDay ? `${lowestSpendDay[0]} ($${lowestSpendDay[1].toFixed(2)})` : 'not enough data'}
+- Primary goal: ${primaryGoal ? `${primaryGoal.name || primaryGoal.goalType}, target $${primaryGoal.targetAmount}` : 'none set'}
+
+Output ONLY a JSON object with this exact structure:
+{
+  "bestDayPrefix": "text before the highlighted day, e.g. 'You save the most on '",
+  "bestDayHighlight": "the day name, bold-worthy short phrase",
+  "bestDaySuffix": "text after, e.g. ' — keep that pattern going.'",
+  "coffeePrefix": "text before the highlighted category insight",
+  "coffeeHighlight": "short highlighted phrase about the top category",
+  "coffeeSuffix": "text after"
+}`.trim();
+
+    let aiInsights;
+    try {
+      const { text } = await callAI(prompt, null, true);
+      aiInsights = extractJson(text);
+    } catch (err) {
+      console.error('❌ Insights AI failed:', err.message);
+      aiInsights = {
+        bestDayPrefix: 'You tend to save more on ',
+        bestDayHighlight: lowestSpendDay ? lowestSpendDay[0] : 'quiet days',
+        bestDaySuffix: ' — nice consistency.',
+        coffeePrefix: 'Your biggest category is ',
+        coffeeHighlight: topCategory ? topCategory[0] : 'spending',
+        coffeeSuffix: ' — worth a look if you want to save faster.',
+      };
+    }
+
+    res.json({
+      savingsAmount: `$${savings.toFixed(0)}`,
+      savingsSubtitle: 'saved this month',
+      savingsRatePercent: `${savingsRate}%`,
+      monthlyTrend: monthlySavings.length ? monthlySavings : [0, 0, 0, 0, 0, 0],
+      months: orderedSnapshots.map(s => s.monthKey.split('-')[1]),
+      ...aiInsights,
+    });
+  } catch (err) {
+    console.error('INSIGHTS OVERVIEW ERROR:', err);
+    res.status(500).json({ error: err.message || 'Internal server error' });
+  }
+});
 // ══════════════════════════════════════════════════════════════════════════════
 //  HEALTH CHECK & ERROR HANDLING
 // ══════════════════════════════════════════════════════════════════════════════
