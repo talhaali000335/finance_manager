@@ -3439,6 +3439,111 @@ Output ONLY a JSON object with this exact structure:
 });
 
 
+app.get('/api/badges', authenticate, async (req, res) => {
+  try {
+    const profile = await Profile.findOne({ userId: req.userId });
+    const goals   = await Goal.find({ userId: req.userId });
+    if (!profile) return res.status(404).json({ error: 'Profile not found' });
+
+    // ---- Compute XP & Level (simple logic) ----
+    const completed = profile.completedSteps || 0;
+    const totalTasks = profile.completedTasks?.length || 0;
+    const xp = completed * 50 + totalTasks * 10;   // example calculation
+    const level = Math.floor(xp / 500) + 1;
+    const xpForNextLevel = level * 500;
+    const xpProgress = Math.min(xp / xpForNextLevel, 1);
+
+    // ---- Compute streaks (using profile.createdAt as first active day) ----
+    const firstDay = profile.createdAt || new Date();
+    const now = new Date();
+    const diffDays = Math.floor((now - firstDay) / (1000 * 60 * 60 * 24));
+    const currentStreak = Math.min(diffDays, 7);   // cap at 7 for demo
+    const longestStreak = currentStreak;            // you can store this in profile
+
+    // ---- Badge definitions (static list, but you can extend via DB) ----
+    const allBadges = [
+      { id: 'first_goal',  title: 'First Goal',     desc: 'Set your first financial goal',    imageUrl: 'https://.../badge1.png' },
+      { id: 'saver_starter', title: 'Saver Starter',  desc: 'Save $500 in your first month',     imageUrl: 'https://.../badge2.png' },
+      { id: 'budget_master', title: 'Budget Master',  desc: 'Stay under budget for 3 months',    imageUrl: 'https://.../badge3.png' },
+      { id: 'goal_crusher', title: 'Goal Crusher',    desc: 'Achieve 80% of a goal target',      imageUrl: 'https://.../badge4.png' },
+      { id: 'streak_7',     title: '7 Day Streak',    desc: 'Log spending for 7 days in a row',  imageUrl: 'https://.../badge5.png' },
+      { id: 'frugal_hero',  title: 'Frugal Hero',     desc: 'Reduce discretionary spending by 20%', imageUrl: 'https://.../badge6.png' },
+    ];
+
+    // Determine which badges are earned (simplified logic)
+    const earned = new Set();
+    if (goals.length > 0) earned.add('first_goal');
+    const savingsRate = profile.primarySalary ? ((profile.cashSavings || 0) / profile.primarySalary) : 0;
+    if (savingsRate >= 0.1) earned.add('saver_starter');
+    if (profile.completedSteps >= 3) earned.add('budget_master');
+    const primaryGoal = goals.sort((a,b) => (b.priority||0)-(a.priority||0))[0];
+    if (primaryGoal && primaryGoal.targetAmount > 0) {
+      const progress = (primaryGoal.existingSavings || 0) / primaryGoal.targetAmount;
+      if (progress >= 0.8) earned.add('goal_crusher');
+    }
+    if (totalTasks >= 7) earned.add('streak_7');
+    const ent = profile.entertainment || 0;
+    const income = (profile.primarySalary || 0) + (profile.sideIncome || 0);
+    if (income > 0 && (ent / income) < 0.05) earned.add('frugal_hero');
+
+    const badges = allBadges.map(b => ({
+      title: b.title,
+      desc: b.desc,
+      imageUrl: b.imageUrl,
+      locked: !earned.has(b.id)
+    }));
+
+    // ---- AI‑generated achievement banner ----
+    const prompt = `
+You are a motivating financial coach. Write a short achievement banner for a user's badge collection.
+Real data:
+- Level: ${level}
+- XP: ${xp} (progress ${Math.round(xpProgress*100)}%)
+- Earned badges: ${earned.size} / ${allBadges.length}
+- Current streak: ${currentStreak} days
+
+Output ONLY a JSON object:
+{
+  "achievementTitle": "short inspiring title (max 6 words)",
+  "achievementDesc": "1 sentence describing the recent achievement (max 12 words)"
+}`.trim();
+
+    let ai = {};
+    try {
+      const { text } = await callAI(prompt, null, true);
+      ai = extractJson(text);
+      if (!ai.achievementTitle) throw new Error('Incomplete AI');
+    } catch (err) {
+      console.error('AI fallback for badges:', err.message);
+      ai = {
+        achievementTitle: 'On a Roll!',
+        achievementDesc: 'You just unlocked a new badge – keep it up!'
+      };
+    }
+
+    res.json({
+      levelTitle: `Level ${level}`,
+      xpText: `${xp} XP`,
+      xpProgress,
+      earnedCount: earned.size,
+      currentStreak,
+      longestStreak,
+      achievementTitle: ai.achievementTitle,
+      achievementDesc: ai.achievementDesc,
+      badges,
+      // static header texts (can also be AI‑generated)
+      headerTitle: 'Your Badges',
+      headerSubtitle: 'Collect them all',
+      trophyRoom: 'Trophy Room'
+    });
+  } catch (err) {
+    console.error('BADGES ERROR:', err);
+    res.status(500).json({ error: err.message || 'Internal server error' });
+  }
+});
+
+
+
 // ══════════════════════════════════════════════════════════════════════════════
 //  HEALTH CHECK & ERROR HANDLING
 // ══════════════════════════════════════════════════════════════════════════════
