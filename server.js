@@ -3461,14 +3461,56 @@ app.get('/api/badges', authenticate, async (req, res) => {
     const longestStreak = currentStreak;            // you can store this in profile
 
     // ---- Badge definitions (static list, but you can extend via DB) ----
-    const allBadges = [
-  { id: 'first_goal',    title: 'First Goal',    desc: 'Set your first financial goal',        imageUrl: 'https://res.cloudinary.com/<your-cloud>/image/upload/badges/first_goal.png' },
-  { id: 'saver_starter', title: 'Saver Starter',  desc: 'Save $500 in your first month',        imageUrl: 'https://res.cloudinary.com/<your-cloud>/image/upload/badges/saver_starter.png' },
-  { id: 'budget_master', title: 'Budget Master',  desc: 'Stay under budget for 3 months',       imageUrl: 'https://res.cloudinary.com/<your-cloud>/image/upload/badges/budget_master.png' },
-  { id: 'goal_crusher',  title: 'Goal Crusher',   desc: 'Achieve 80% of a goal target',         imageUrl: 'https://res.cloudinary.com/<your-cloud>/image/upload/badges/goal_crusher.png' },
-  { id: 'streak_7',      title: '7 Day Streak',   desc: 'Log spending for 7 days in a row',     imageUrl: 'https://res.cloudinary.com/<your-cloud>/image/upload/badges/streak_7.png' },
-  { id: 'frugal_hero',   title: 'Frugal Hero',    desc: 'Reduce discretionary spending by 20%', imageUrl: 'https://res.cloudinary.com/<your-cloud>/image/upload/badges/frugal_hero.png' },
-];
+   static const List<Map<String, dynamic>> badges = [
+    {
+      "title": "7-Day Streak",
+      "desc": "No reactive buys",
+      "icon": Icons.local_fire_department,
+      "locked": false,
+    },
+    {
+      "title": "First Savings",
+      "desc": "Cornerstone set",
+      "icon": Icons.savings,
+      "locked": false,
+    },
+    {
+      "title": "Debt Destroyer",
+      "desc": "High interest cleared",
+      "icon": Icons.shield,
+      "locked": false,
+    },
+    {
+      "title": "Goal Crusher",
+      "desc": "First target unlocked",
+      "icon": Icons.emoji_events,
+      "locked": false,
+    },
+    {
+      "title": "Smart Spender",
+      "desc": "Sub-budgets kept",
+      "icon": Icons.account_balance_wallet,
+      "locked": false,
+    },
+    {
+      "title": "Financial Explorer",
+      "desc": "Explore locked zones",
+      "icon": Icons.explore,
+      "locked": true,
+    },
+    {
+      "title": "Budget Master",
+      "desc": "Keep 3 streak months",
+      "icon": Icons.military_tech,
+      "locked": true,
+    },
+    {
+      "title": "Consistency King",
+      "desc": "Daily tracking master",
+      "icon": Icons.workspace_premium,
+      "locked": true,
+    },
+  ];
 
     // Determine which badges are earned (simplified logic)
     const earned = new Set();
@@ -3487,11 +3529,11 @@ app.get('/api/badges', authenticate, async (req, res) => {
     if (income > 0 && (ent / income) < 0.05) earned.add('frugal_hero');
 
     const badges = allBadges.map(b => ({
-      title: b.title,
-      desc: b.desc,
-      imageUrl: b.imageUrl,
-      locked: !earned.has(b.id)
-    }));
+  title: b.title,
+  desc: b.desc,
+  icon: b.icon,
+  locked: !earned.has(b.id)
+}));
 
     // ---- AI‑generated achievement banner ----
     const prompt = `
@@ -3552,14 +3594,14 @@ app.get('/api/subscriptions', authenticate, async (req, res) => {
     const grouped = {};
 
     intents.forEach(i => {
-      if (!subscriptionCategories.includes(i.category)) return;
-      const key = (i.place && i.place.trim()) || (i.note && i.note.trim()) || i.category;
-      if (!grouped[key]) grouped[key] = { count: 0, total: 0, category: i.category, name: key };
+      const cat = (i.category || '').toLowerCase().trim();
+      if (!subscriptionCategories.includes(cat)) return;
+      const key = (i.place && i.place.trim()) || (i.note && i.note.trim()) || cat;
+      if (!grouped[key]) grouped[key] = { count: 0, total: 0, category: cat, name: key };
       grouped[key].count++;
       grouped[key].total += i.amount;
     });
 
-    // Show anything seen at least once — don't require repeats
     const detected = Object.values(grouped);
 
     const subscriptions = detected.map((r, i) => ({
@@ -3595,8 +3637,6 @@ app.get('/api/subscriptions', authenticate, async (req, res) => {
     res.status(500).json({ error: 'Internal server error' });
   }
 });
-
-
 
 
 // ══════════════════════════════════════════════════════════════════════════════
