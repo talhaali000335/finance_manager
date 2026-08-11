@@ -3548,8 +3548,7 @@ Output ONLY a JSON object:
 app.get('/api/subscriptions', authenticate, async (req, res) => {
   try {
     const intents = await Intent.find({ userId: req.userId }).sort({ createdAt: -1 });
-    
-    // Detect recurring transactions (simplified)
+
     const recurringCandidates = {};
     const subscriptionCategories = ['entertainment', 'software', 'health', 'education'];
     intents.forEach(i => {
@@ -3562,49 +3561,49 @@ app.get('/api/subscriptions', authenticate, async (req, res) => {
     });
 
     const recurring = Object.values(recurringCandidates).filter(c => c.count >= 2);
-    let subscriptions;
 
-    if (recurring.length >= 1) {
-      subscriptions = recurring.map((r, i) => ({
-        name: r.category.charAt(0).toUpperCase() + r.category.slice(1),
-        price: `$${(r.total / r.count).toFixed(0)}/mo`,
-        renewsOn: 'Next billing cycle',
-        usageLevel: i % 3 === 0 ? 'high' : i % 3 === 1 ? 'medium' : 'low',
-        usageLabel: i % 3 === 0 ? 'Daily use' : i % 3 === 1 ? 'Weekly use' : 'Rarely used',
-        potentialSaving: i === 1,
-        icon: r.category === 'entertainment' ? 'netflix' : r.category === 'health' ? 'gym' : 'spotify'
-      }));
-    } else {
-      // Fallback if no recurring intents
-      subscriptions = [
-        { name: 'Netflix', price: '$15/mo', renewsOn: 'Monthly', usageLevel: 'high', usageLabel: 'Daily use', potentialSaving: false, icon: 'netflix' },
-        { name: 'Spotify', price: '$10/mo', renewsOn: 'Monthly', usageLevel: 'high', usageLabel: 'Daily use', potentialSaving: false, icon: 'spotify' },
-      ];
-    }
+    const subscriptions = recurring.map((r, i) => ({
+      name: r.category.charAt(0).toUpperCase() + r.category.slice(1),
+      price: `$${(r.total / r.count).toFixed(0)}/mo`,
+      renewsOn: 'Next billing cycle',
+      usageLevel: i % 3 === 0 ? 'high' : i % 3 === 1 ? 'medium' : 'low',
+      usageLabel: i % 3 === 0 ? 'Daily use' : i % 3 === 1 ? 'Weekly use' : 'Rarely used',
+      potentialSaving: i === 1,
+      icon: r.category === 'entertainment' ? 'netflix' : r.category === 'health' ? 'gym' : 'spotify',
+    }));
 
     const total = subscriptions.reduce((sum, s) => sum + parseFloat(s.price.replace(/[^0-9.]/g, '')), 0);
     const categories = subscriptions.map(s => ({
       label: s.name,
       amount: s.price,
-      percent: total > 0 ? parseFloat(s.price.replace(/[^0-9.]/g, '')) / total : 1/subscriptions.length,
+      percent: total > 0 ? parseFloat(s.price.replace(/[^0-9.]/g, '')) / total : 0,
     }));
 
     res.json({
       title: 'Subscriptions',
-      subtitle: 'Track and optimize your recurring payments',
+      subtitle: subscriptions.length
+        ? 'Track and optimize your recurring payments'
+        : 'No recurring subscriptions detected yet',
       totalAmount: `$${total.toFixed(0)}`,
       activeCount: `${subscriptions.length} active`,
       activeSubscriptionsTitle: 'Active Subscriptions',
       categories,
       items: subscriptions,
-      aiOptimizationTitle: 'AI Optimization',
-      aiOptimizationText: 'You could save by reviewing your rarely used subscriptions.',
+      aiOptimizationTitle: subscriptions.length ? 'AI Optimization' : null,
+      aiOptimizationText: subscriptions.length
+        ? 'You could save by reviewing your rarely used subscriptions.'
+        : null,
     });
   } catch (err) {
     console.error('SUBSCRIPTIONS ERROR:', err);
     res.status(500).json({ error: 'Internal server error' });
   }
 });
+
+
+
+
+
 
 // ══════════════════════════════════════════════════════════════════════════════
 //  HEALTH CHECK & ERROR HANDLING
