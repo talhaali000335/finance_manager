@@ -3462,12 +3462,12 @@ app.get('/api/badges', authenticate, async (req, res) => {
 
     // ---- Badge definitions (static list, but you can extend via DB) ----
     const allBadges = [
-  { id: 'first_goal',  title: 'First Goal',     desc: 'Set your first financial goal',    imageUrl: 'https://lh3.googleusercontent.com/.../badge1.png' },
-  { id: 'saver_starter', title: 'Saver Starter',  desc: 'Save $500 in your first month',     imageUrl: 'https://lh3.googleusercontent.com/.../badge2.png' },
-  { id: 'budget_master', title: 'Budget Master',  desc: 'Stay under budget for 3 months',    imageUrl: 'https://lh3.googleusercontent.com/.../badge3.png' },
-  { id: 'goal_crusher', title: 'Goal Crusher',    desc: 'Achieve 80% of a goal target',      imageUrl: 'https://lh3.googleusercontent.com/.../badge4.png' },
-  { id: 'streak_7',     title: '7 Day Streak',    desc: 'Log spending for 7 days in a row',  imageUrl: 'https://lh3.googleusercontent.com/.../badge5.png' },
-  { id: 'frugal_hero',  title: 'Frugal Hero',     desc: 'Reduce discretionary spending by 20%', imageUrl: 'https://lh3.googleusercontent.com/.../badge6.png' },
+  { id: 'first_goal',    title: 'First Goal',    desc: 'Set your first financial goal',        imageUrl: 'https://res.cloudinary.com/<your-cloud>/image/upload/badges/first_goal.png' },
+  { id: 'saver_starter', title: 'Saver Starter',  desc: 'Save $500 in your first month',        imageUrl: 'https://res.cloudinary.com/<your-cloud>/image/upload/badges/saver_starter.png' },
+  { id: 'budget_master', title: 'Budget Master',  desc: 'Stay under budget for 3 months',       imageUrl: 'https://res.cloudinary.com/<your-cloud>/image/upload/badges/budget_master.png' },
+  { id: 'goal_crusher',  title: 'Goal Crusher',   desc: 'Achieve 80% of a goal target',         imageUrl: 'https://res.cloudinary.com/<your-cloud>/image/upload/badges/goal_crusher.png' },
+  { id: 'streak_7',      title: '7 Day Streak',   desc: 'Log spending for 7 days in a row',     imageUrl: 'https://res.cloudinary.com/<your-cloud>/image/upload/badges/streak_7.png' },
+  { id: 'frugal_hero',   title: 'Frugal Hero',    desc: 'Reduce discretionary spending by 20%', imageUrl: 'https://res.cloudinary.com/<your-cloud>/image/upload/badges/frugal_hero.png' },
 ];
 
     // Determine which badges are earned (simplified logic)
@@ -3544,31 +3544,31 @@ Output ONLY a JSON object:
 
 
 
-
 app.get('/api/subscriptions', authenticate, async (req, res) => {
   try {
     const intents = await Intent.find({ userId: req.userId }).sort({ createdAt: -1 });
 
-    const recurringCandidates = {};
     const subscriptionCategories = ['entertainment', 'software', 'health', 'education'];
+    const grouped = {};
+
     intents.forEach(i => {
-      if (subscriptionCategories.includes(i.category)) {
-        const key = i.place || i.note || i.category;
-        if (!recurringCandidates[key]) recurringCandidates[key] = { count: 0, total: 0, category: i.category };
-        recurringCandidates[key].count++;
-        recurringCandidates[key].total += i.amount;
-      }
+      if (!subscriptionCategories.includes(i.category)) return;
+      const key = (i.place && i.place.trim()) || (i.note && i.note.trim()) || i.category;
+      if (!grouped[key]) grouped[key] = { count: 0, total: 0, category: i.category, name: key };
+      grouped[key].count++;
+      grouped[key].total += i.amount;
     });
 
-    const recurring = Object.values(recurringCandidates).filter(c => c.count >= 2);
+    // Show anything seen at least once — don't require repeats
+    const detected = Object.values(grouped);
 
-    const subscriptions = recurring.map((r, i) => ({
-      name: r.category.charAt(0).toUpperCase() + r.category.slice(1),
+    const subscriptions = detected.map((r, i) => ({
+      name: r.name.charAt(0).toUpperCase() + r.name.slice(1),
       price: `$${(r.total / r.count).toFixed(0)}/mo`,
-      renewsOn: 'Next billing cycle',
+      renewsOn: r.count >= 2 ? 'Next billing cycle' : 'Detected once — confirm recurrence',
       usageLevel: i % 3 === 0 ? 'high' : i % 3 === 1 ? 'medium' : 'low',
       usageLabel: i % 3 === 0 ? 'Daily use' : i % 3 === 1 ? 'Weekly use' : 'Rarely used',
-      potentialSaving: i === 1,
+      potentialSaving: false,
       icon: r.category === 'entertainment' ? 'netflix' : r.category === 'health' ? 'gym' : 'spotify',
     }));
 
@@ -3581,26 +3581,20 @@ app.get('/api/subscriptions', authenticate, async (req, res) => {
 
     res.json({
       title: 'Subscriptions',
-      subtitle: subscriptions.length
-        ? 'Track and optimize your recurring payments'
-        : 'No recurring subscriptions detected yet',
+      subtitle: subscriptions.length ? 'Track and optimize your recurring payments' : 'No recurring subscriptions detected yet',
       totalAmount: `$${total.toFixed(0)}`,
       activeCount: `${subscriptions.length} active`,
       activeSubscriptionsTitle: 'Active Subscriptions',
       categories,
       items: subscriptions,
       aiOptimizationTitle: subscriptions.length ? 'AI Optimization' : null,
-      aiOptimizationText: subscriptions.length
-        ? 'You could save by reviewing your rarely used subscriptions.'
-        : null,
+      aiOptimizationText: subscriptions.length ? 'You could save by reviewing your rarely used subscriptions.' : null,
     });
   } catch (err) {
     console.error('SUBSCRIPTIONS ERROR:', err);
     res.status(500).json({ error: 'Internal server error' });
   }
 });
-
-
 
 
 
