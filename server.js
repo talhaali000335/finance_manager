@@ -3438,87 +3438,44 @@ Output ONLY a JSON object with this exact structure:
   }
 });
 
-
 app.get('/api/badges', authenticate, async (req, res) => {
   try {
     const profile = await Profile.findOne({ userId: req.userId });
     const goals   = await Goal.find({ userId: req.userId });
     if (!profile) return res.status(404).json({ error: 'Profile not found' });
 
-    // ---- Compute XP & Level (simple logic) ----
+    // ---- Compute XP & Level ----
     const completed = profile.completedSteps || 0;
     const totalTasks = profile.completedTasks?.length || 0;
-    const xp = completed * 50 + totalTasks * 10;   // example calculation
+    const xp = completed * 50 + totalTasks * 10;
     const level = Math.floor(xp / 500) + 1;
     const xpForNextLevel = level * 500;
     const xpProgress = Math.min(xp / xpForNextLevel, 1);
 
-    // ---- Compute streaks (using profile.createdAt as first active day) ----
+    // ---- Compute streaks ----
     const firstDay = profile.createdAt || new Date();
     const now = new Date();
     const diffDays = Math.floor((now - firstDay) / (1000 * 60 * 60 * 24));
-    const currentStreak = Math.min(diffDays, 7);   // cap at 7 for demo
-    const longestStreak = currentStreak;            // you can store this in profile
+    const currentStreak = Math.min(diffDays, 7);
+    const longestStreak = currentStreak;
 
-    // ---- Badge definitions (static list, but you can extend via DB) ----
-   static const List<Map<String, dynamic>> badges = [
-    {
-      "title": "7-Day Streak",
-      "desc": "No reactive buys",
-      "icon": Icons.local_fire_department,
-      "locked": false,
-    },
-    {
-      "title": "First Savings",
-      "desc": "Cornerstone set",
-      "icon": Icons.savings,
-      "locked": false,
-    },
-    {
-      "title": "Debt Destroyer",
-      "desc": "High interest cleared",
-      "icon": Icons.shield,
-      "locked": false,
-    },
-    {
-      "title": "Goal Crusher",
-      "desc": "First target unlocked",
-      "icon": Icons.emoji_events,
-      "locked": false,
-    },
-    {
-      "title": "Smart Spender",
-      "desc": "Sub-budgets kept",
-      "icon": Icons.account_balance_wallet,
-      "locked": false,
-    },
-    {
-      "title": "Financial Explorer",
-      "desc": "Explore locked zones",
-      "icon": Icons.explore,
-      "locked": true,
-    },
-    {
-      "title": "Budget Master",
-      "desc": "Keep 3 streak months",
-      "icon": Icons.military_tech,
-      "locked": true,
-    },
-    {
-      "title": "Consistency King",
-      "desc": "Daily tracking master",
-      "icon": Icons.workspace_premium,
-      "locked": true,
-    },
-  ];
+    // ---- Badge definitions (JS objects, icon names as strings) ----
+    const allBadges = [
+      { id: 'first_goal',    title: 'First Goal',        desc: 'Set your first financial goal',        icon: 'flag' },
+      { id: 'saver_starter', title: 'Saver Starter',      desc: 'Save $500 in your first month',        icon: 'savings' },
+      { id: 'budget_master', title: 'Budget Master',      desc: 'Stay under budget for 3 months',       icon: 'account_balance_wallet' },
+      { id: 'goal_crusher',  title: 'Goal Crusher',       desc: 'Achieve 80% of a goal target',         icon: 'emoji_events' },
+      { id: 'streak_7',      title: '7 Day Streak',       desc: 'Log spending for 7 days in a row',     icon: 'local_fire_department' },
+      { id: 'frugal_hero',   title: 'Frugal Hero',        desc: 'Reduce discretionary spending by 20%', icon: 'eco' },
+    ];
 
-    // Determine which badges are earned (simplified logic)
+    // ---- Determine earned badges ----
     const earned = new Set();
     if (goals.length > 0) earned.add('first_goal');
     const savingsRate = profile.primarySalary ? ((profile.cashSavings || 0) / profile.primarySalary) : 0;
     if (savingsRate >= 0.1) earned.add('saver_starter');
     if (profile.completedSteps >= 3) earned.add('budget_master');
-    const primaryGoal = goals.sort((a,b) => (b.priority||0)-(a.priority||0))[0];
+    const primaryGoal = goals.sort((a, b) => (b.priority || 0) - (a.priority || 0))[0];
     if (primaryGoal && primaryGoal.targetAmount > 0) {
       const progress = (primaryGoal.existingSavings || 0) / primaryGoal.targetAmount;
       if (progress >= 0.8) earned.add('goal_crusher');
@@ -3529,18 +3486,18 @@ app.get('/api/badges', authenticate, async (req, res) => {
     if (income > 0 && (ent / income) < 0.05) earned.add('frugal_hero');
 
     const badges = allBadges.map(b => ({
-  title: b.title,
-  desc: b.desc,
-  icon: b.icon,
-  locked: !earned.has(b.id)
-}));
+      title: b.title,
+      desc: b.desc,
+      icon: b.icon,
+      locked: !earned.has(b.id),
+    }));
 
-    // ---- AI‑generated achievement banner ----
+    // ---- AI achievement banner ----
     const prompt = `
 You are a motivating financial coach. Write a short achievement banner for a user's badge collection.
 Real data:
 - Level: ${level}
-- XP: ${xp} (progress ${Math.round(xpProgress*100)}%)
+- XP: ${xp} (progress ${Math.round(xpProgress * 100)}%)
 - Earned badges: ${earned.size} / ${allBadges.length}
 - Current streak: ${currentStreak} days
 
@@ -3559,7 +3516,7 @@ Output ONLY a JSON object:
       console.error('AI fallback for badges:', err.message);
       ai = {
         achievementTitle: 'On a Roll!',
-        achievementDesc: 'You just unlocked a new badge – keep it up!'
+        achievementDesc: 'You just unlocked a new badge – keep it up!',
       };
     }
 
@@ -3573,18 +3530,15 @@ Output ONLY a JSON object:
       achievementTitle: ai.achievementTitle,
       achievementDesc: ai.achievementDesc,
       badges,
-      // static header texts (can also be AI‑generated)
       headerTitle: 'Your Badges',
       headerSubtitle: 'Collect them all',
-      trophyRoom: 'Trophy Room'
+      trophyRoom: 'Trophy Room',
     });
   } catch (err) {
     console.error('BADGES ERROR:', err);
     res.status(500).json({ error: err.message || 'Internal server error' });
   }
 });
-
-
 
 app.get('/api/subscriptions', authenticate, async (req, res) => {
   try {
