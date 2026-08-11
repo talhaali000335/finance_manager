@@ -3462,13 +3462,13 @@ app.get('/api/badges', authenticate, async (req, res) => {
 
     // ---- Badge definitions (static list, but you can extend via DB) ----
     const allBadges = [
-      { id: 'first_goal',  title: 'First Goal',     desc: 'Set your first financial goal',    imageUrl: 'https://.../badge1.png' },
-      { id: 'saver_starter', title: 'Saver Starter',  desc: 'Save $500 in your first month',     imageUrl: 'https://.../badge2.png' },
-      { id: 'budget_master', title: 'Budget Master',  desc: 'Stay under budget for 3 months',    imageUrl: 'https://.../badge3.png' },
-      { id: 'goal_crusher', title: 'Goal Crusher',    desc: 'Achieve 80% of a goal target',      imageUrl: 'https://.../badge4.png' },
-      { id: 'streak_7',     title: '7 Day Streak',    desc: 'Log spending for 7 days in a row',  imageUrl: 'https://.../badge5.png' },
-      { id: 'frugal_hero',  title: 'Frugal Hero',     desc: 'Reduce discretionary spending by 20%', imageUrl: 'https://.../badge6.png' },
-    ];
+  { id: 'first_goal',  title: 'First Goal',     desc: 'Set your first financial goal',    imageUrl: 'https://lh3.googleusercontent.com/.../badge1.png' },
+  { id: 'saver_starter', title: 'Saver Starter',  desc: 'Save $500 in your first month',     imageUrl: 'https://lh3.googleusercontent.com/.../badge2.png' },
+  { id: 'budget_master', title: 'Budget Master',  desc: 'Stay under budget for 3 months',    imageUrl: 'https://lh3.googleusercontent.com/.../badge3.png' },
+  { id: 'goal_crusher', title: 'Goal Crusher',    desc: 'Achieve 80% of a goal target',      imageUrl: 'https://lh3.googleusercontent.com/.../badge4.png' },
+  { id: 'streak_7',     title: '7 Day Streak',    desc: 'Log spending for 7 days in a row',  imageUrl: 'https://lh3.googleusercontent.com/.../badge5.png' },
+  { id: 'frugal_hero',  title: 'Frugal Hero',     desc: 'Reduce discretionary spending by 20%', imageUrl: 'https://lh3.googleusercontent.com/.../badge6.png' },
+];
 
     // Determine which badges are earned (simplified logic)
     const earned = new Set();
