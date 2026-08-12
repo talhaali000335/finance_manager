@@ -3697,7 +3697,38 @@ app.get('/api/budget-overview', authenticate, async (req, res) => {
 });
 
 
-app.get('/api/smart-budget', authenticate, async (req, res) => {
+app.post('/api/smart-budget/apply', authenticate, async (req, res) => {
+  try {
+    const { income, items } = req.body;
+    if (!income || !Array.isArray(items)) {
+      return res.status(400).json({ error: 'Invalid payload' });
+    }
+
+    // Save to profile fields (simplified mapping)
+    const update = {
+      primarySalary: income,
+      rent: items.find(i => i.title === 'Housing')?.amount || 0,
+      food: items.find(i => i.title === 'Food & Dining')?.amount || 0,
+      transport: items.find(i => i.title === 'Transport')?.amount || 0,
+      entertainment: items.find(i => i.title === 'Entertainment')?.amount || 0,
+    };
+
+    await Profile.findOneAndUpdate(
+      { userId: req.userId },
+      { $set: update },
+      { new: true, upsert: true }
+    );
+
+    res.json({ success: true, message: 'Budget applied successfully' });
+  } catch (err) {
+    console.error('APPLY SMART BUDGET ERROR:', err);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+
+
+app.get('/api/money-challenges', authenticate, async (req, res) => {
   try {
     const profile = await Profile.findOne({ userId: req.userId });
     if (!profile) return res.status(404).json({ error: 'Profile not found' });
@@ -3709,121 +3740,39 @@ app.get('/api/smart-budget', authenticate, async (req, res) => {
       createdAt: { $gte: currentMonthStart }
     });
 
-    // Income
-    const income = (profile.primarySalary || 0) + (profile.sideIncome || 0);
-
-    // Budget allocations from profile fields
-    const allocations = [
-      {
-        title: 'Housing',
-        amount: profile.rent || 1500,
-        iconUrl: 'https://lh3.googleusercontent.com/aida-public/AB6AXuAPxSJXFqDxxOjj4oacZUJwfUvp-UtpY5Rd0DslDgwl-yUTa4WQ6IV8Y9TkieQUCC4P7ZCNe2wQ0K8iIVaaRdP_duqHBEBc51Np-yAB2rJw7eRYy6mzpj-XsJIjhPjYeoDHVpbAMdbneYacVORcYmUVnTXwPJGPr4OBlus6fWNgBPPrf0JgNFKXQUK-X_hc2fqaJ0BMbupO5F2KwWWDprg1af2bY08-axnf9vs8ApPsqn5kiDY_egmu',
-        color: 'green'
-      },
-      {
-        title: 'Food & Dining',
-        amount: profile.food || 500,
-        iconUrl: 'https://lh3.googleusercontent.com/aida-public/AB6AXuDR8yeGSYVdn1x8E9nepJxn83uf0TFNBvCs92LlBwWfhlRR6rTPvLXDjdUyuRVXcHrnyewwcSxAFUrqt66IPSOcnwEMTHIhifESI-0Y0qtQan3ET2mVhUpzC3oxqQRh9CBgUPtRjnJERq7cQqJqyWHjYJGj-aWVZWkRI8sX03vRwrL0jABe-KfU2lcSXT6MRt2BncwC8F8M4JWBs45umfWZoVJwL2XY4jMNpq_pfVl_5szpifTuB_kd',
-        color: 'amber'
-      },
-      {
-        title: 'Transport',
-        amount: profile.transport || 200,
-        iconUrl: 'https://lh3.googleusercontent.com/aida-public/AB6AXuA6LPKljevMa5MQ6VX_H4sH3f0Modhw2IOQqUgqtthbX7ayq7T7XokjMNrjuPgOqQR-SjCF4ZIltlmy1X6QDp-vuHs0umIw-6CPBvNFMJN3MZFK8k91UIqPpm_FpGFV_H4YuF3DRP5yNYOwDPAeGssm3Iz0Hs73rw1p55dgj8PMMdv6DU3_lT_MSll6IyFK82xhIoNPbyhXP9DLGiNWik72Rb55u3PhFnfpUMLGZAstfNrzLXZIxOwK',
-        color: 'green'
-      }
-    ];
-
-    // Compute spent per category from intents (fallback to profile amounts)
-    const categoryMap = {
-      'housing': 'Housing',
-      'food': 'Food & Dining',
-      'transport': 'Transport'
-    };
-    const spentMap = {};
-    intents.forEach(i => {
-      const cat = categoryMap[i.category];
-      if (cat) spentMap[cat] = (spentMap[cat] || 0) + i.amount;
-    });
-    // Fallback if no intents
-    if (!spentMap['Housing']) spentMap['Housing'] = profile.rent || 1500;
-    if (!spentMap['Food & Dining']) spentMap['Food & Dining'] = profile.food || 500;
-    if (!spentMap['Transport']) spentMap['Transport'] = profile.transport || 200;
-
-    // Final allocation items
-    const items = allocations.map(alloc => {
-      const budget = alloc.amount;
-      const spent = spentMap[alloc.title] || 0;
-      const progress = budget > 0 ? Math.min(spent / budget, 1) : 0;
-      const percentage = income > 0 ? Math.round((budget / income) * 100) : 0;
-      return {
-        iconUrl: alloc.iconUrl,
-        title: alloc.title,
-        amount: `$${budget}`,
-        percentage: `${percentage}%`,
-        progress: progress,
-        progressColor: alloc.color === 'amber' ? '#F59E0B' : '#059669'
-      };
-    });
-
-    // AI optimization text
-    const prompt = `Based on the user's monthly income of $${income} and these budget allocations: ${JSON.stringify(items.map(i => ({ title: i.title, amount: i.amount, percentage: i.percentage })))}, generate a short AI-optimized budget tip. Return ONLY one sentence.`;
-    let aiDescription = '';
-    try {
-      const { text } = await callAI(prompt, null, false);
-      aiDescription = text.trim();
-    } catch (e) {
-      aiDescription = "Based on your spending, here's a smart allocation that fits your lifestyle.";
-    }
-
-    res.json({
-      title: 'Smart Budget',
-      subtitle: 'Plan smarter, not harder',
-      monthlyIncome: 'Monthly Income',
-      incomeAmount: `$${income}`,
-      aiOptimizedTitle: 'AI Optimized Match',
-      aiOptimizedDesc: aiDescription,
-      recommendationsTitle: 'Recommendations',
-      applyButton: 'Apply Budget',
-      items,
-    });
-  } catch (err) {
-    console.error('SMART BUDGET ERROR:', err);
-    res.status(500).json({ error: err.message || 'Internal server error' });
-  }
-});
-
-
-
-
-
-app.get('/api/money-challenges', authenticate, async (req, res) => {
-  try {
-    const profile = await Profile.findOne({ userId: req.userId });
-    if (!profile) return res.status(404).json({ error: 'Profile not found' });
-
-    // Compute streak from profile.completedSteps or tasks
-    const streak = profile.completedSteps || 0;
-
-    // Active challenge – based on savings rate
+    // Income & expenses
     const income = (profile.primarySalary || 0) + (profile.sideIncome || 0);
     const expenses = (profile.rent || 0) + (profile.food || 0) + (profile.transport || 0) + (profile.entertainment || 0) + (profile.monthlyEMI || 0);
     const savingsRate = income > 0 ? Math.round(((income - expenses) / income) * 100) : 0;
-    const progress = Math.min(Math.max(savingsRate / 30, 0.1), 1); // cap at 100%
 
+    // Active challenge: Save 30% of income
+    const progress = Math.min(Math.max(savingsRate / 30, 0.05), 1);
     const activeChallenge = {
       label: 'Active Challenge',
       title: 'Save 30% of Income',
-      desc: `You're currently saving ${savingsRate}% of your income. Keep pushing toward 30%!`,
-      progress: progress,
+      desc: `You are saving ${savingsRate}% of income. Keep going!`,
+      progress,
       progressText: `${Math.round(progress * 100)}% complete`,
       timerLabel: 'Ends in',
       timerText: '12 days',
       rewardText: '🏆 +500 XP & Financial Freedom Badge',
     };
 
-    // Available challenges (AI generated)
-    const prompt = `Based on the user's financial profile (income: $${income}, savings rate: ${savingsRate}%, expenses: $${expenses}), generate 4 short money-saving challenges. Each challenge should have a title (max 4 words), a description (max 10 words), and a reward (max 5 words). Return ONLY a JSON array of objects with keys: title, desc, reward.`;
+    // Generate available challenges based on top spending categories
+    const categoryMap = {
+      'food': 'Food & Dining',
+      'transport': 'Transport',
+      'entertainment': 'Entertainment',
+      'shopping': 'Shopping',
+    };
+    const categoryTotals = {};
+    intents.forEach(i => {
+      const cat = categoryMap[i.category];
+      if (cat) categoryTotals[cat] = (categoryTotals[cat] || 0) + i.amount;
+    });
+    const topCategory = Object.entries(categoryTotals).sort((a,b) => b[1]-a[1])[0];
+
+    const prompt = `Based on this user's top spending category (${topCategory ? `${topCategory[0]} ($${topCategory[1].toFixed(2)})` : 'not enough data'}), generate 4 short money-saving challenges. Each challenge should have a title (max 4 words), a description (max 10 words), and a reward (max 5 words). Return ONLY a JSON array of objects with keys: title, desc, reward.`;
     let challenges = [];
     try {
       const { text } = await callAI(prompt, null, true);
@@ -3848,7 +3797,7 @@ app.get('/api/money-challenges', authenticate, async (req, res) => {
     res.json({
       title: 'Money Challenges',
       subtitle: 'Level up your savings game',
-      streak: `${streak} day streak`,
+      streak: `${profile.completedSteps || 0} day streak`,
       availableTitle: 'Available Challenges',
       activeChallenge,
       challenges,
@@ -3861,6 +3810,22 @@ app.get('/api/money-challenges', authenticate, async (req, res) => {
   }
 });
 
+// Endpoint to start a challenge (you can store it in Profile or a separate collection)
+app.post('/api/money-challenges/start', authenticate, async (req, res) => {
+  try {
+    const { title, desc, reward } = req.body;
+    // Here you can save the active challenge to Profile, e.g., profile.activeChallenge = { ... }
+    // For simplicity, we'll just update the user's completedTasks or a dedicated field.
+    await Profile.findOneAndUpdate(
+      { userId: req.userId },
+      { $set: { activeChallenge: { title, desc, reward, startedAt: new Date() } } },
+      { upsert: true }
+    );
+    res.json({ success: true, message: 'Challenge started' });
+  } catch (err) {
+    res.status(500).json({ error: 'Failed to start challenge' });
+  }
+});
 
 
 
