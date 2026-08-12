@@ -3697,6 +3697,113 @@ app.get('/api/budget-overview', authenticate, async (req, res) => {
 });
 
 
+
+
+app.get('/api/smart-budget', authenticate, async (req, res) => {
+  try {
+    const profile = await Profile.findOne({ userId: req.userId });
+    if (!profile) return res.status(404).json({ error: 'Profile not found' });
+
+    const now = new Date();
+    const currentMonthStart = new Date(now.getFullYear(), now.getMonth(), 1);
+    const intents = await Intent.find({
+      userId: req.userId,
+      createdAt: { $gte: currentMonthStart }
+    });
+
+    // Income
+    const income = (profile.primarySalary || 0) + (profile.sideIncome || 0);
+
+    // Budget allocations from profile fields
+    const allocations = [
+      {
+        title: 'Housing',
+        amount: profile.rent || 1500,
+        iconUrl: 'https://lh3.googleusercontent.com/aida-public/AB6AXuAPxSJXFqDxxOjj4oacZUJwfUvp-UtpY5Rd0DslDgwl-yUTa4WQ6IV8Y9TkieQUCC4P7ZCNe2wQ0K8iIVaaRdP_duqHBEBc51Np-yAB2rJw7eRYy6mzpj-XsJIjhPjYeoDHVpbAMdbneYacVORcYmUVnTXwPJGPr4OBlus6fWNgBPPrf0JgNFKXQUK-X_hc2fqaJ0BMbupO5F2KwWWDprg1af2bY08-axnf9vs8ApPsqn5kiDY_egmu',
+        color: 'green'
+      },
+      {
+        title: 'Food & Dining',
+        amount: profile.food || 500,
+        iconUrl: 'https://lh3.googleusercontent.com/aida-public/AB6AXuDR8yeGSYVdn1x8E9nepJxn83uf0TFNBvCs92LlBwWfhlRR6rTPvLXDjdUyuRVXcHrnyewwcSxAFUrqt66IPSOcnwEMTHIhifESI-0Y0qtQan3ET2mVhUpzC3oxqQRh9CBgUPtRjnJERq7cQqJqyWHjYJGj-aWVZWkRI8sX03vRwrL0jABe-KfU2lcSXT6MRt2BncwC8F8M4JWBs45umfWZoVJwL2XY4jMNpq_pfVl_5szpifTuB_kd',
+        color: 'amber'
+      },
+      {
+        title: 'Transport',
+        amount: profile.transport || 200,
+        iconUrl: 'https://lh3.googleusercontent.com/aida-public/AB6AXuA6LPKljevMa5MQ6VX_H4sH3f0Modhw2IOQqUgqtthbX7ayq7T7XokjMNrjuPgOqQR-SjCF4ZIltlmy1X6QDp-vuHs0umIw-6CPBvNFMJN3MZFK8k91UIqPpm_FpGFV_H4YuF3DRP5yNYOwDPAeGssm3Iz0Hs73rw1p55dgj8PMMdv6DU3_lT_MSll6IyFK82xhIoNPbyhXP9DLGiNWik72Rb55u3PhFnfpUMLGZAstfNrzLXZIxOwK',
+        color: 'green'
+      },
+      {
+        title: 'Entertainment',
+        amount: profile.entertainment || 150,
+        iconUrl: 'https://lh3.googleusercontent.com/aida-public/AB6AXuDLt8XJrHtik_tcYtbGC52-qIae-0qSd2p_6tgiJWeyJPCsL6QVj4Ws9rKAI0wV7mET8CPiSfolNbNeLitRgUd2tBqeutWKReH1ikAu9R7VF5hflr6N5Nbg2njtHrDX-KyVpv-WtlqqOCNxVr9qiYoQ9j8ow6PVxNOTOhf6FlqmS24ez0HyezeD1z-tjMUbm4rubt1YOKC5Q2eLakhTri1hPlAc44Jg_PxN58qqdAZhpyEWYsGPYc9h',
+        color: 'red'
+      }
+    ];
+
+    // Compute spent per category from intents (fallback to profile amounts)
+    const categoryMap = {
+      'housing': 'Housing',
+      'food': 'Food & Dining',
+      'transport': 'Transport',
+      'entertainment': 'Entertainment'
+    };
+    const spentMap = {};
+    intents.forEach(i => {
+      const cat = categoryMap[i.category];
+      if (cat) spentMap[cat] = (spentMap[cat] || 0) + i.amount;
+    });
+
+    // Fallback if no intents
+    if (!spentMap['Housing']) spentMap['Housing'] = profile.rent || 1200;
+    if (!spentMap['Food & Dining']) spentMap['Food & Dining'] = profile.food || 380;
+    if (!spentMap['Transport']) spentMap['Transport'] = profile.transport || 120;
+    if (!spentMap['Entertainment']) spentMap['Entertainment'] = profile.entertainment || 140;
+
+    const items = allocations.map(alloc => {
+      const budget = alloc.amount;
+      const spent = spentMap[alloc.title] || 0;
+      const progress = budget > 0 ? Math.min(spent / budget, 1) : 0;
+      const percentage = income > 0 ? Math.round((budget / income) * 100) : 0;
+      return {
+        iconUrl: alloc.iconUrl,
+        title: alloc.title,
+        amount: `$${budget}`,
+        percentage: `${percentage}%`,
+        progress,
+        progressColor: alloc.color === 'amber' ? '#F59E0B' : alloc.color === 'red' ? '#EF4444' : '#059669',
+      };
+    });
+
+    // AI optimization text
+    const prompt = `Based on the user's monthly income of $${income} and these budget allocations: ${JSON.stringify(items.map(i => ({ title: i.title, amount: i.amount, percentage: i.percentage })))}, generate a short AI-optimized budget tip. Return ONLY one sentence.`;
+    let aiDescription = '';
+    try {
+      const { text } = await callAI(prompt, null, false);
+      aiDescription = text.trim();
+    } catch (e) {
+      aiDescription = "Based on your spending, here's a smart allocation that fits your lifestyle.";
+    }
+
+    res.json({
+      title: 'Smart Budget',
+      subtitle: 'Plan smarter, not harder',
+      monthlyIncome: 'Monthly Income',
+      incomeAmount: `$${income}`,
+      aiOptimizedTitle: 'AI Optimized Match',
+      aiOptimizedDesc: aiDescription,
+      recommendationsTitle: 'Recommendations',
+      applyButton: 'Apply Budget',
+      items,
+    });
+  } catch (err) {
+    console.error('SMART BUDGET ERROR:', err);
+    res.status(500).json({ error: err.message || 'Internal server error' });
+  }
+});
+
+
 app.post('/api/smart-budget/apply', authenticate, async (req, res) => {
   try {
     const { income, items } = req.body;
