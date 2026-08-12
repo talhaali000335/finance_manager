@@ -330,7 +330,7 @@ const Message = mongoose.model('Message', messageSchema);
 
 
 
-// Add this model at the top (if not already present)
+// ─── Active Challenge Model ───────────────────────────────────────────────────
 const activeChallengeSchema = new mongoose.Schema({
   userId:   { type: String, required: true },
   title:    { type: String, required: true },
@@ -340,8 +340,6 @@ const activeChallengeSchema = new mongoose.Schema({
 }, { timestamps: true });
 
 const ActiveChallenge = mongoose.model('ActiveChallenge', activeChallengeSchema);
-
-
 
 
 
@@ -3855,31 +3853,22 @@ app.post('/api/smart-budget/apply', authenticate, async (req, res) => {
 });
 
 
-
 app.get('/api/money-challenges', authenticate, async (req, res) => {
   try {
     const profile = await Profile.findOne({ userId: req.userId });
     if (!profile) return res.status(404).json({ error: 'Profile not found' });
 
-    const now = new Date();
-    const currentMonthStart = new Date(now.getFullYear(), now.getMonth(), 1);
-    const intents = await Intent.find({
-      userId: req.userId,
-      createdAt: { $gte: currentMonthStart }
-    });
+    // Get latest active challenge
+    const active = await ActiveChallenge.findOne({ userId: req.userId })
+      .sort({ createdAt: -1 });
 
-    // Income & expenses
-    const income = (profile.primarySalary || 0) + (profile.sideIncome || 0);
-    const expenses = (profile.rent || 0) + (profile.food || 0) + (profile.transport || 0) + (profile.entertainment || 0) + (profile.monthlyEMI || 0);
-    const savingsRate = income > 0 ? Math.round(((income - expenses) / income) * 100) : 0;
-
-    // Completed challenges (from profile)
+    // Completed challenge titles (from Profile.completedTasks)
     const completedTitles = profile.completedTasks || [];
 
-    // Generate available challenges using AI, excluding completed ones
+    // Generate available challenges via AI (excluding completed)
     const prompt = `Generate 4 short money-saving challenges for the user.
     The user has already completed these challenges: ${JSON.stringify(completedTitles)}.
-    Do NOT include any of the completed titles.
+    Do NOT include any completed titles.
     Each challenge should have a title (max 4 words), a description (max 10 words), and a reward (max 5 words).
     Return ONLY a JSON array of objects with keys: title, desc, reward.`;
 
@@ -3888,6 +3877,8 @@ app.get('/api/money-challenges', authenticate, async (req, res) => {
       const { text } = await callAI(prompt, null, true);
       challenges = JSON.parse(text);
       if (!Array.isArray(challenges) || challenges.length < 4) throw new Error('Invalid');
+      // Filter out any that somehow match completed
+      challenges = challenges.filter(c => !completedTitles.includes(c.title));
     } catch (err) {
       challenges = [
         { title: 'No-Spend Weekend', desc: 'Avoid all non-essential spending this weekend.', reward: 'Save $50' },
@@ -3897,25 +3888,27 @@ app.get('/api/money-challenges', authenticate, async (req, res) => {
       ].filter(c => !completedTitles.includes(c.title));
     }
 
-    // Choose a new active challenge (first available, or create a generic one)
-    let activeChallenge;
-    if (challenges.length > 0) {
-      const selected = challenges[0];
+    // Build active challenge object
+    let activeChallenge = null;
+    if (active) {
+      // Compute progress (simplified based on savings rate)
+      const income = (profile.primarySalary || 0) + (profile.sideIncome || 0);
+      const expenses = (profile.rent || 0) + (profile.food || 0) + (profile.transport || 0) + (profile.entertainment || 0) + (profile.monthlyEMI || 0);
+      const savingsRate = income > 0 ? Math.round(((income - expenses) / income) * 100) : 0;
+      const progress = Math.min(Math.max(savingsRate / 30, 0.05), 1);
+
       activeChallenge = {
         label: 'Active Challenge',
-        title: selected.title,
-        desc: selected.desc,
-        progress: Math.min(Math.max(savingsRate / 30, 0.05), 1),
-        progressText: `${Math.round(Math.min(Math.max(savingsRate / 30, 0.05), 1) * 100)}% complete`,
+        title: active.title,
+        desc: active.desc || 'Keep pushing!',
+        progress: progress,
+        progressText: `${Math.round(progress * 100)}% complete`,
         timerLabel: 'Ends in',
-        timerText: '7 days',  // you can adjust
-        rewardText: `🏆 ${selected.reward}`,
+        timerText: '7 days',
+        rewardText: `🏆 ${active.reward || 'Bonus XP'}`,
       };
-    } else {
-      activeChallenge = null;
     }
 
-    // Completed challenges (badges)
     const completed = {
       title: 'Completed Challenges',
       subtitle: `${completedTitles.length} completed this month`,
@@ -3939,17 +3932,45 @@ app.get('/api/money-challenges', authenticate, async (req, res) => {
 });
 
 // Replace the endpoint with this
+app.post('/api/money-challenges/start', authenticate, async (req, res) => {
+  try {
+    const { title, desc, reward } = req.body;
+    if (!title) return res.status(400).json({ error: 'Title is required' });
+
+    // Clear previous active challenges for this user
+    await ActiveChallenge.deleteMany({ userId: req.userId });
+
+    // Create new active challenge
+    await ActiveChallenge.create({
+      userId: req.userId,
+      title,
+      desc: desc || '',
+      reward: reward || '',
+    });
+
+    res.status(201).json({ success: true, message: 'Challenge started' });
+  } catch (err) {
+    console.error('START CHALLENGE ERROR:', err);
+    res.status(500).json({ error: 'Failed to start challenge' });
+  }
+});
+
+
+
 app.post('/api/money-challenges/complete', authenticate, async (req, res) => {
   try {
     const { title } = req.body;
     if (!title) return res.status(400).json({ error: 'Title is required' });
 
-    // Add title to completedTasks (if not already there)
+    // Add to completedTasks (unique)
     await Profile.findOneAndUpdate(
       { userId: req.userId },
       { $addToSet: { completedTasks: title } },
       { upsert: true, new: true }
     );
+
+    // Remove active challenge
+    await ActiveChallenge.deleteMany({ userId: req.userId });
 
     res.json({ success: true, message: 'Challenge completed' });
   } catch (err) {
@@ -3957,8 +3978,6 @@ app.post('/api/money-challenges/complete', authenticate, async (req, res) => {
     res.status(500).json({ error: 'Failed to complete challenge' });
   }
 });
-
-
 
 
 app.get('/api/financial-journey', authenticate, async (req, res) => {
