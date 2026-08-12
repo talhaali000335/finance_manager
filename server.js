@@ -327,6 +327,27 @@ const messageSchema = new mongoose.Schema({
 messageSchema.index({ conversation: 1, createdAt: -1 });
 const Message = mongoose.model('Message', messageSchema);
 
+
+
+
+// Add this model at the top (if not already present)
+const activeChallengeSchema = new mongoose.Schema({
+  userId:   { type: String, required: true },
+  title:    { type: String, required: true },
+  desc:     { type: String, default: '' },
+  reward:   { type: String, default: '' },
+  startedAt:{ type: Date, default: Date.now },
+}, { timestamps: true });
+
+const ActiveChallenge = mongoose.model('ActiveChallenge', activeChallengeSchema);
+
+
+
+
+
+
+
+
 // ══════════════════════════════════════════════════════════════════════════════
 //  HELPERS
 // ══════════════════════════════════════════════════════════════════════════════
@@ -3917,19 +3938,27 @@ app.get('/api/money-challenges', authenticate, async (req, res) => {
   }
 });
 
-// Endpoint to start a challenge (you can store it in Profile or a separate collection)
+
+// Replace the endpoint with this
 app.post('/api/money-challenges/start', authenticate, async (req, res) => {
   try {
     const { title, desc, reward } = req.body;
-    // Here you can save the active challenge to Profile, e.g., profile.activeChallenge = { ... }
-    // For simplicity, we'll just update the user's completedTasks or a dedicated field.
-    await Profile.findOneAndUpdate(
-      { userId: req.userId },
-      { $set: { activeChallenge: { title, desc, reward, startedAt: new Date() } } },
-      { upsert: true }
-    );
-    res.json({ success: true, message: 'Challenge started' });
+    if (!title) return res.status(400).json({ error: 'Title is required' });
+
+    // Remove any previous active challenge for this user
+    await ActiveChallenge.deleteMany({ userId: req.userId });
+
+    // Create new active challenge
+    await ActiveChallenge.create({
+      userId: req.userId,
+      title,
+      desc: desc || '',
+      reward: reward || '',
+    });
+
+    res.status(201).json({ success: true, message: 'Challenge started' });
   } catch (err) {
+    console.error('START CHALLENGE ERROR:', err);
     res.status(500).json({ error: 'Failed to start challenge' });
   }
 });
