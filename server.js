@@ -3873,34 +3873,16 @@ app.get('/api/money-challenges', authenticate, async (req, res) => {
     const expenses = (profile.rent || 0) + (profile.food || 0) + (profile.transport || 0) + (profile.entertainment || 0) + (profile.monthlyEMI || 0);
     const savingsRate = income > 0 ? Math.round(((income - expenses) / income) * 100) : 0;
 
-    // Active challenge: Save 30% of income
-    const progress = Math.min(Math.max(savingsRate / 30, 0.05), 1);
-    const activeChallenge = {
-      label: 'Active Challenge',
-      title: 'Save 30% of Income',
-      desc: `You are saving ${savingsRate}% of income. Keep going!`,
-      progress,
-      progressText: `${Math.round(progress * 100)}% complete`,
-      timerLabel: 'Ends in',
-      timerText: '12 days',
-      rewardText: '🏆 +500 XP & Financial Freedom Badge',
-    };
+    // Completed challenges (from profile)
+    const completedTitles = profile.completedTasks || [];
 
-    // Generate available challenges based on top spending categories
-    const categoryMap = {
-      'food': 'Food & Dining',
-      'transport': 'Transport',
-      'entertainment': 'Entertainment',
-      'shopping': 'Shopping',
-    };
-    const categoryTotals = {};
-    intents.forEach(i => {
-      const cat = categoryMap[i.category];
-      if (cat) categoryTotals[cat] = (categoryTotals[cat] || 0) + i.amount;
-    });
-    const topCategory = Object.entries(categoryTotals).sort((a,b) => b[1]-a[1])[0];
+    // Generate available challenges using AI, excluding completed ones
+    const prompt = `Generate 4 short money-saving challenges for the user.
+    The user has already completed these challenges: ${JSON.stringify(completedTitles)}.
+    Do NOT include any of the completed titles.
+    Each challenge should have a title (max 4 words), a description (max 10 words), and a reward (max 5 words).
+    Return ONLY a JSON array of objects with keys: title, desc, reward.`;
 
-    const prompt = `Based on this user's top spending category (${topCategory ? `${topCategory[0]} ($${topCategory[1].toFixed(2)})` : 'not enough data'}), generate 4 short money-saving challenges. Each challenge should have a title (max 4 words), a description (max 10 words), and a reward (max 5 words). Return ONLY a JSON array of objects with keys: title, desc, reward.`;
     let challenges = [];
     try {
       const { text } = await callAI(prompt, null, true);
@@ -3912,13 +3894,31 @@ app.get('/api/money-challenges', authenticate, async (req, res) => {
         { title: 'Cook at Home', desc: 'Prepare all meals at home for one week.', reward: 'Save $75' },
         { title: 'Cancel One Subscription', desc: 'Pause a rarely used subscription.', reward: 'Save $15/mo' },
         { title: 'Bike to Work', desc: 'Commute by bike or walk instead of driving.', reward: 'Save $30' },
-      ];
+      ].filter(c => !completedTitles.includes(c.title));
+    }
+
+    // Choose a new active challenge (first available, or create a generic one)
+    let activeChallenge;
+    if (challenges.length > 0) {
+      const selected = challenges[0];
+      activeChallenge = {
+        label: 'Active Challenge',
+        title: selected.title,
+        desc: selected.desc,
+        progress: Math.min(Math.max(savingsRate / 30, 0.05), 1),
+        progressText: `${Math.round(Math.min(Math.max(savingsRate / 30, 0.05), 1) * 100)}% complete`,
+        timerLabel: 'Ends in',
+        timerText: '7 days',  // you can adjust
+        rewardText: `🏆 ${selected.reward}`,
+      };
+    } else {
+      activeChallenge = null;
     }
 
     // Completed challenges (badges)
     const completed = {
       title: 'Completed Challenges',
-      subtitle: '3 completed this month',
+      subtitle: `${completedTitles.length} completed this month`,
       emojis: ['🛡️', '🌱', '🧘', '🚲'],
     };
 
@@ -3938,30 +3938,27 @@ app.get('/api/money-challenges', authenticate, async (req, res) => {
   }
 });
 
-
 // Replace the endpoint with this
-app.post('/api/money-challenges/start', authenticate, async (req, res) => {
+app.post('/api/money-challenges/complete', authenticate, async (req, res) => {
   try {
-    const { title, desc, reward } = req.body;
+    const { title } = req.body;
     if (!title) return res.status(400).json({ error: 'Title is required' });
 
-    // Remove any previous active challenge for this user
-    await ActiveChallenge.deleteMany({ userId: req.userId });
+    // Add title to completedTasks (if not already there)
+    await Profile.findOneAndUpdate(
+      { userId: req.userId },
+      { $addToSet: { completedTasks: title } },
+      { upsert: true, new: true }
+    );
 
-    // Create new active challenge
-    await ActiveChallenge.create({
-      userId: req.userId,
-      title,
-      desc: desc || '',
-      reward: reward || '',
-    });
-
-    res.status(201).json({ success: true, message: 'Challenge started' });
+    res.json({ success: true, message: 'Challenge completed' });
   } catch (err) {
-    console.error('START CHALLENGE ERROR:', err);
-    res.status(500).json({ error: 'Failed to start challenge' });
+    console.error('COMPLETE CHALLENGE ERROR:', err);
+    res.status(500).json({ error: 'Failed to complete challenge' });
   }
 });
+
+
 
 
 app.get('/api/financial-journey', authenticate, async (req, res) => {
