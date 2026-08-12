@@ -3828,7 +3828,109 @@ app.post('/api/money-challenges/start', authenticate, async (req, res) => {
 });
 
 
+app.get('/api/financial-journey', authenticate, async (req, res) => {
+  try {
+    const profile = await Profile.findOne({ userId: req.userId });
+    const goals = await Goal.find({ userId: req.userId }).sort({ priority: -1 });
+    if (!profile) return res.status(404).json({ error: 'Profile not found' });
 
+    // Compute monthly savings trend (last 12 months from MonthlySnapshot)
+    const now = new Date();
+    const months = [];
+    for (let i = 11; i >= 0; i--) {
+      const d = new Date(now.getFullYear(), now.getMonth() - i, 1);
+      months.push({
+        key: `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`,
+        label: d.toLocaleString('default', { month: 'short' }),
+      });
+    }
+    const snapshots = await MonthlySnapshot.find({
+      userId: req.userId,
+      monthKey: { $in: months.map(m => m.key) }
+    });
+    const snapMap = {};
+    snapshots.forEach(s => snapMap[s.monthKey] = s);
+    const chartValues = months.map(m => {
+      const snap = snapMap[m.key];
+      if (!snap) return 0;
+      return Math.max(snap.income - snap.expenses, 0);
+    });
+    // Normalize to 0-1 for the chart bars/line (use max)
+    const maxVal = Math.max(...chartValues, 1);
+    const normalized = chartValues.map(v => v / maxVal);
+
+    // Stats
+    const income = (profile.primarySalary || 0) + (profile.sideIncome || 0);
+    const expenses = (profile.rent || 0) + (profile.food || 0) + (profile.transport || 0) + (profile.entertainment || 0) + (profile.monthlyEMI || 0);
+    const savingsRate = income > 0 ? Math.round(((income - expenses) / income) * 100) : 0;
+    const milestonesHit = goals.filter(g => g.existingSavings >= g.targetAmount).length;
+    const streakActive = profile.completedSteps || 0; // simplified
+    const goalsOnTrack = goals.filter(g => g.existingSavings / (g.targetAmount || 1) >= 0.5).length;
+
+    // AI Insights
+    const prompt = `Generate three short financial insights for the user's journey. Based on: savings rate ${savingsRate}%, goals count ${goals.length}, active streak ${streakActive} days. Each insight should have a title (max 5 words) and description (max 12 words). Return ONLY a JSON array of objects with keys: title, desc.`;
+    let insights = [];
+    try {
+      const { text } = await callAI(prompt, null, true);
+      insights = JSON.parse(text);
+      if (!Array.isArray(insights) || insights.length < 3) throw new Error('Invalid');
+    } catch (err) {
+      insights = [
+        { title: 'Savings Momentum', desc: 'You are consistently saving more each month.' },
+        { title: 'Goal Progress', desc: 'Your primary goal is on track.' },
+        { title: 'Smart Budgeting', desc: 'Your budget allocation is well balanced.' },
+      ];
+    }
+
+    res.json({
+      title: 'Your Financial Journey',
+      subtitle: 'Track your growth and stay on course.',
+      growthTrendTitle: 'Growth Trend',
+      growthTrendSubtitle: 'Last 12 months',
+      months: months.map(m => m.label),
+      chartValues: normalized,
+      aiInsightsTitle: 'AI Insights',
+      activeLabel: 'Active',
+      insights: [
+        {
+          icon: 'auto_awesome',
+          iconColor: '#F59E0B',
+          iconBgColor: '#FFF4E5',
+          title: insights[0].title,
+          description: insights[0].desc,
+          route: '/mydream/money-chellenger',
+        },
+        {
+          icon: 'trending_up',
+          iconColor: '#F59E0B',
+          iconBgColor: '#FFF4E5',
+          title: insights[1].title,
+          description: insights[1].desc,
+          route: null,
+        },
+        {
+          icon: 'account_balance',
+          iconColor: '#4A72A4',
+          iconBgColor: '#E6EEF8',
+          title: insights[2].title,
+          description: insights[2].desc,
+          route: '/mydream/smart-budget',
+        },
+      ],
+      stats: {
+        milestonesHit: milestonesHit,
+        milestonesLabel: 'Milestones',
+        streakActive: streakActive,
+        streakLabel: 'Day Streak',
+        goalsOnTrack: goalsOnTrack,
+        goalsLabel: 'Goals On Track',
+      },
+    });
+  } catch (err) {
+    console.error('FINANCIAL JOURNEY ERROR:', err);
+    res.status(500).json({ error: err.message || 'Internal server error' });
+  }
+});
 
 
 
