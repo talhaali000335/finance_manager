@@ -3793,6 +3793,80 @@ app.get('/api/smart-budget', authenticate, async (req, res) => {
   }
 });
 
+
+
+
+
+app.get('/api/money-challenges', authenticate, async (req, res) => {
+  try {
+    const profile = await Profile.findOne({ userId: req.userId });
+    if (!profile) return res.status(404).json({ error: 'Profile not found' });
+
+    // Compute streak from profile.completedSteps or tasks
+    const streak = profile.completedSteps || 0;
+
+    // Active challenge – based on savings rate
+    const income = (profile.primarySalary || 0) + (profile.sideIncome || 0);
+    const expenses = (profile.rent || 0) + (profile.food || 0) + (profile.transport || 0) + (profile.entertainment || 0) + (profile.monthlyEMI || 0);
+    const savingsRate = income > 0 ? Math.round(((income - expenses) / income) * 100) : 0;
+    const progress = Math.min(Math.max(savingsRate / 30, 0.1), 1); // cap at 100%
+
+    const activeChallenge = {
+      label: 'Active Challenge',
+      title: 'Save 30% of Income',
+      desc: `You're currently saving ${savingsRate}% of your income. Keep pushing toward 30%!`,
+      progress: progress,
+      progressText: `${Math.round(progress * 100)}% complete`,
+      timerLabel: 'Ends in',
+      timerText: '12 days',
+      rewardText: '🏆 +500 XP & Financial Freedom Badge',
+    };
+
+    // Available challenges (AI generated)
+    const prompt = `Based on the user's financial profile (income: $${income}, savings rate: ${savingsRate}%, expenses: $${expenses}), generate 4 short money-saving challenges. Each challenge should have a title (max 4 words), a description (max 10 words), and a reward (max 5 words). Return ONLY a JSON array of objects with keys: title, desc, reward.`;
+    let challenges = [];
+    try {
+      const { text } = await callAI(prompt, null, true);
+      challenges = JSON.parse(text);
+      if (!Array.isArray(challenges) || challenges.length < 4) throw new Error('Invalid');
+    } catch (err) {
+      challenges = [
+        { title: 'No-Spend Weekend', desc: 'Avoid all non-essential spending this weekend.', reward: 'Save $50' },
+        { title: 'Cook at Home', desc: 'Prepare all meals at home for one week.', reward: 'Save $75' },
+        { title: 'Cancel One Subscription', desc: 'Pause a rarely used subscription.', reward: 'Save $15/mo' },
+        { title: 'Bike to Work', desc: 'Commute by bike or walk instead of driving.', reward: 'Save $30' },
+      ];
+    }
+
+    // Completed challenges (badges)
+    const completed = {
+      title: 'Completed Challenges',
+      subtitle: '3 completed this month',
+      emojis: ['🛡️', '🌱', '🧘', '🚲'],
+    };
+
+    res.json({
+      title: 'Money Challenges',
+      subtitle: 'Level up your savings game',
+      streak: `${streak} day streak`,
+      availableTitle: 'Available Challenges',
+      activeChallenge,
+      challenges,
+      completed,
+      startButton: 'Start',
+    });
+  } catch (err) {
+    console.error('MONEY CHALLENGES ERROR:', err);
+    res.status(500).json({ error: err.message || 'Internal server error' });
+  }
+});
+
+
+
+
+
+
+
 // ══════════════════════════════════════════════════════════════════════════════
 //  HEALTH CHECK & ERROR HANDLING
 // ══════════════════════════════════════════════════════════════════════════════
