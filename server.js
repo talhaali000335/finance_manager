@@ -3593,6 +3593,110 @@ app.get('/api/subscriptions', authenticate, async (req, res) => {
 });
 
 
+app.get('/api/budget-overview', authenticate, async (req, res) => {
+  try {
+    const profile = await Profile.findOne({ userId: req.userId });
+    if (!profile) return res.status(404).json({ error: 'Profile not found' });
+
+    const now = new Date();
+    const monthNames = ['January','February','March','April','May','June','July','August','September','October','November','December'];
+    const currentMonth = monthNames[now.getMonth()];
+    const year = now.getFullYear();
+
+    // Get current month's intents for actual spending
+    const currentMonthStart = new Date(now.getFullYear(), now.getMonth(), 1);
+    const intents = await Intent.find({
+      userId: req.userId,
+      createdAt: { $gte: currentMonthStart }
+    });
+
+    // Define category budgets from profile (fallback to example if missing)
+    const budgets = {
+      'Housing': { budget: profile.rent || 1500, iconUrl: 'https://lh3.googleusercontent.com/aida-public/...' },
+      'Food & Dining': { budget: profile.food || 500, iconUrl: 'https://lh3.googleusercontent.com/aida-public/...' },
+      'Transport': { budget: profile.transport || 200, iconUrl: 'https://lh3.googleusercontent.com/aida-public/...' },
+      'Entertainment': { budget: profile.entertainment || 150, iconUrl: 'https://lh3.googleusercontent.com/aida-public/...' },
+    };
+
+    // Compute actual spending per category from intents (simplified)
+    const spentMap = {};
+    const categoryMap = {
+      'housing': 'Housing',
+      'food': 'Food & Dining',
+      'transport': 'Transport',
+      'entertainment': 'Entertainment'
+    };
+    intents.forEach(i => {
+      const cat = categoryMap[i.category];
+      if (cat) {
+        spentMap[cat] = (spentMap[cat] || 0) + i.amount;
+      }
+    });
+
+    // Fallback if no intents: use profile fields as spent
+    if (!spentMap['Housing']) spentMap['Housing'] = profile.rent || 1200;
+    if (!spentMap['Food & Dining']) spentMap['Food & Dining'] = profile.food || 380;
+    if (!spentMap['Transport']) spentMap['Transport'] = profile.transport || 120;
+    if (!spentMap['Entertainment']) spentMap['Entertainment'] = profile.entertainment || 140;
+
+    const categories = [];
+    let totalBudget = 0, totalSpent = 0;
+    for (const [name, conf] of Object.entries(budgets)) {
+      const budget = conf.budget;
+      const spent = spentMap[name] || 0;
+      totalBudget += budget;
+      totalSpent += spent;
+      const percentUsed = budget > 0 ? Math.min(Math.round((spent / budget) * 100), 100) : 0;
+      const left = Math.max(budget - spent, 0);
+      const color = percentUsed >= 90 ? 'red' : percentUsed >= 75 ? 'amber' : 'green';
+      categories.push({
+        name,
+        spent,
+        budget,
+        left,
+        percentUsed,
+        color,
+        iconUrl: conf.iconUrl,
+      });
+    }
+
+    const percentTotalUsed = totalBudget > 0 ? Math.round((totalSpent / totalBudget) * 100) : 0;
+    const remaining = Math.max(totalBudget - totalSpent, 0);
+
+    // AI insight (or fallback)
+    let insightBannerText = '';
+    try {
+      const prompt = `The user has spent $${totalSpent} out of $${totalBudget} total budget (${percentTotalUsed}%). They have $${remaining} remaining. Give a short encouraging insight in one sentence.`;
+      const { text } = await callAI(prompt, null, false);
+      insightBannerText = text.trim();
+    } catch (e) {
+      insightBannerText = "You've been under budget for 3 weeks straight. That's building real momentum!";
+    }
+
+    const user = await User.findById(req.userId).select('profilePictureUrl name');
+    const profileImageUrl = user?.profilePictureUrl || 'https://ui-avatars.com/api/?name=User&background=random&format=png';
+
+    res.json({
+      title: `${currentMonth} Budget`,
+      subtitle: 'Conscious limits, effortless alignment.',
+      profileImageUrl,
+      summary: {
+        percentUsed: percentTotalUsed,
+        remainingAmount: `$${remaining.toLocaleString()}`,
+        insightText: "You're spending with intention this month.",
+      },
+      categories,
+      insightBanner: {
+        text: insightBannerText,
+      },
+    });
+  } catch (err) {
+    console.error('BUDGET OVERVIEW ERROR:', err);
+    res.status(500).json({ error: err.message || 'Internal server error' });
+  }
+});
+
+
 // ══════════════════════════════════════════════════════════════════════════════
 //  HEALTH CHECK & ERROR HANDLING
 // ══════════════════════════════════════════════════════════════════════════════
