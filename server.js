@@ -3826,31 +3826,36 @@ app.get('/api/smart-budget', authenticate, async (req, res) => {
 app.post('/api/smart-budget/apply', authenticate, async (req, res) => {
   try {
     const { income, items } = req.body;
-    if (!income || !Array.isArray(items)) {
+    if (income === undefined || income === null || !Array.isArray(items)) {
       return res.status(400).json({ error: 'Invalid payload' });
     }
+    const parsedIncome = Number(income);
+    if (Number.isNaN(parsedIncome) || parsedIncome < 0) {
+      return res.status(400).json({ error: 'Income must be a valid non-negative number' });
+    }
 
-    // Save to profile fields (simplified mapping)
     const update = {
-      primarySalary: income,
+      primarySalary: parsedIncome,
       rent: items.find(i => i.title === 'Housing')?.amount || 0,
       food: items.find(i => i.title === 'Food & Dining')?.amount || 0,
       transport: items.find(i => i.title === 'Transport')?.amount || 0,
       entertainment: items.find(i => i.title === 'Entertainment')?.amount || 0,
     };
 
-    await Profile.findOneAndUpdate(
+    const profile = await Profile.findOneAndUpdate(
       { userId: req.userId },
       { $set: update },
       { new: true, upsert: true }
     );
 
-    res.json({ success: true, message: 'Budget applied successfully' });
+    res.json({ success: true, message: 'Budget applied successfully', profile });
   } catch (err) {
     console.error('APPLY SMART BUDGET ERROR:', err);
     res.status(500).json({ error: 'Internal server error' });
   }
 });
+
+
 
 
 app.get('/api/money-challenges', authenticate, async (req, res) => {
@@ -3890,25 +3895,23 @@ app.get('/api/money-challenges', authenticate, async (req, res) => {
 
     // Build active challenge object
     let activeChallenge = null;
-    if (active) {
-      // Compute progress (simplified based on savings rate)
-      const income = (profile.primarySalary || 0) + (profile.sideIncome || 0);
-      const expenses = (profile.rent || 0) + (profile.food || 0) + (profile.transport || 0) + (profile.entertainment || 0) + (profile.monthlyEMI || 0);
-      const savingsRate = income > 0 ? Math.round(((income - expenses) / income) * 100) : 0;
-      const progress = Math.min(Math.max(savingsRate / 30, 0.05), 1);
+   if (active) {
+  const CHALLENGE_DURATION_MS = 7 * 24 * 60 * 60 * 1000; // 7 days
+  const elapsed = Date.now() - new Date(active.startedAt).getTime();
+  const progress = Math.min(Math.max(elapsed / CHALLENGE_DURATION_MS, 0), 1);
+  const daysLeft = Math.max(Math.ceil((CHALLENGE_DURATION_MS - elapsed) / (24 * 60 * 60 * 1000)), 0);
 
-      activeChallenge = {
-        label: 'Active Challenge',
-        title: active.title,
-        desc: active.desc || 'Keep pushing!',
-        progress: progress,
-        progressText: `${Math.round(progress * 100)}% complete`,
-        timerLabel: 'Ends in',
-        timerText: '7 days',
-        rewardText: `🏆 ${active.reward || 'Bonus XP'}`,
-      };
-    }
-
+  activeChallenge = {
+    label: 'Active Challenge',
+    title: active.title,
+    desc: active.desc || 'Keep pushing!',
+    progress,
+    progressText: `${Math.round(progress * 100)}% complete`,
+    timerLabel: 'Ends in',
+    timerText: `${daysLeft} day${daysLeft === 1 ? '' : 's'}`,
+    rewardText: `🏆 ${active.reward || 'Bonus XP'}`,
+  };
+}
     const completed = {
       title: 'Completed Challenges',
       subtitle: `${completedTitles.length} completed this month`,
