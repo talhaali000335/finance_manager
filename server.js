@@ -4174,6 +4174,11 @@ async function sweepExpiredDecisions(userId) {
 }
 
 // ── Create a new pending "Should I Buy" decision ───────────────────────────────
+
+
+
+
+
 app.post('/api/should-i-buy', authenticate, async (req, res) => {
   try {
     await sweepExpiredDecisions(req.userId);
@@ -4255,6 +4260,58 @@ Return ONLY valid JSON with this structure:
   } catch (err) {
     console.error('SHOULD I BUY CREATE ERROR:', err);
     res.status(500).json({ error: err.message || 'Internal server error' });
+  }
+});
+
+
+// ── AI-generated purchase suggestion based on recent transactions ─────────────
+app.get('/api/should-i-buy/suggest', authenticate, async (req, res) => {
+  try {
+    // Fetch recent intents (last 30 days)
+    const thirtyDaysAgo = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000);
+    const intents = await Intent.find({
+      userId: req.userId,
+      createdAt: { $gte: thirtyDaysAgo }
+    }).sort({ createdAt: -1 }).limit(20);
+
+    // Summarize categories and amounts for AI
+    const summary = intents.map(i => ({
+      category: i.category,
+      amount: i.amount,
+      place: i.place || '',
+      date: i.createdAt
+    }));
+
+    const prompt = `Based on the user's recent spending transactions:
+${JSON.stringify(summary, null, 2)}
+
+Suggest one potential purchase item that the user might be considering or that would improve their life, but within a reasonable price range (under $500). The item should be relevant to their spending habits or financial goals.
+
+Return ONLY a JSON object with keys:
+- itemName (string, max 5 words)
+- price (number)
+- category (string, one word or two)
+
+Make it realistic and based on the transactions.`;
+
+    let suggestion;
+    try {
+      const { text } = await callAI(prompt, null, true);
+      suggestion = JSON.parse(text);
+      if (!suggestion.itemName || !suggestion.price) throw new Error('Invalid suggestion');
+    } catch (err) {
+      // Fallback
+      suggestion = {
+        itemName: 'Smart Budget Tracker',
+        price: 29,
+        category: 'Finance',
+      };
+    }
+
+    res.json(suggestion);
+  } catch (err) {
+    console.error('SHOULD I BUY SUGGEST ERROR:', err);
+    res.status(500).json({ error: err.message });
   }
 });
 
