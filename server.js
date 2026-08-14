@@ -4341,19 +4341,39 @@ app.post('/api/habits', authenticate, async (req, res) => {
 // ── List active habits with real streak/dots computed from checkIns ────────────
 app.get('/api/habits', authenticate, async (req, res) => {
   try {
-    const habits = await Habit.find({ userId: req.userId, active: true }).sort({ createdAt: -1 });
-    const now = new Date();
+    let habits = await Habit.find({ userId: req.userId, active: true }).sort({ createdAt: -1 });
 
+    // If no active habits, auto-create three defaults (AI-generated or fallback)
+    if (habits.length === 0) {
+      const defaultTitles = ['Morning Budget Check', 'No-Spend Mornings', 'Weekly Meal Prep'];
+      const defaultSubtitles = [
+        'Review your budget before your first spend.',
+        'No spending before 11 AM.',
+        'Prep meals every Sunday.',
+      ];
+      for (let i = 0; i < 3; i++) {
+        await Habit.create({
+          userId: req.userId,
+          title: defaultTitles[i],
+          subtitle: defaultSubtitles[i],
+          active: true,
+          checkIns: [],
+        });
+      }
+      habits = await Habit.find({ userId: req.userId, active: true }).sort({ createdAt: -1 });
+    }
+
+    // Compute streaks/dots and return
+    const now = new Date();
     const result = habits.map(h => {
       const streak = computeStreak(h.checkIns);
       const checkedInToday = h.checkIns.some(d => isSameLocalDay(d, now));
-      const filledDots = Math.min(streak, h.totalDots);
       return {
         id: h._id,
         title: h.title,
         subtitle: h.subtitle,
         streakText: `${streak} day streak`,
-        filledDots,
+        filledDots: Math.min(streak, h.totalDots),
         totalDots: h.totalDots,
         checkedInToday,
       };
@@ -4407,6 +4427,60 @@ app.delete('/api/habits/:id', authenticate, async (req, res) => {
     res.status(500).json({ error: err.message });
   }
 });
+
+
+
+
+
+
+app.get('/api/habits/suggestions', authenticate, async (req, res) => {
+  try {
+    const profile = await Profile.findOne({ userId: req.userId });
+    const activeHabits = await Habit.find({ userId: req.userId, active: true });
+
+    // Build prompt for AI
+    const activeTitles = activeHabits.map(h => h.title).join(', ');
+    const prompt = `Generate 3 money-saving habit suggestions for the user.
+      They already have these active habits: ${activeTitles || 'none'}.
+      Each suggestion should have:
+      - title (max 4 words)
+      - description (max 10 words)
+      Return ONLY a JSON array of objects with keys: title, description.`;
+
+    let suggestions = [];
+    try {
+      const { text } = await callAI(prompt, null, true);
+      suggestions = JSON.parse(text);
+      if (!Array.isArray(suggestions) || suggestions.length < 3) throw new Error('Invalid');
+    } catch (err) {
+      // Fallback (only if AI fails) – but still dynamic based on active habits
+      suggestions = [
+        { title: 'No-Spend Weekend', description: 'Avoid all non-essential spending this weekend.' },
+        { title: 'Cook at Home', description: 'Prepare all meals at home for one week.' },
+        { title: 'Cancel One Subscription', description: 'Pause a rarely used subscription.' },
+      ].filter(s => !activeHabits.some(h => h.title === s.title));
+    }
+
+    // Generate a short AI insight
+    let insight = '';
+    try {
+      const insightPrompt = `Generate a one-sentence encouraging money habit insight based on ${activeHabits.length} active habits.`;
+      const { text } = await callAI(insightPrompt, null, false);
+      insight = text.trim();
+    } catch (_) {
+      insight = "You're building momentum. Keep stacking small wins.";
+    }
+
+    res.json({ suggestions, insight });
+  } catch (err) {
+    console.error('HABIT SUGGESTIONS ERROR:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+
+
+
 
 
 // ══════════════════════════════════════════════════════════════════════════════
