@@ -4088,6 +4088,189 @@ app.get('/api/financial-journey', authenticate, async (req, res) => {
 });
 
 
+// Add near your other API routes
+
+app.get('/api/money-habits', authenticate, async (req, res) => {
+  try {
+    const profile = await Profile.findOne({ userId: req.userId });
+    if (!profile) return res.status(404).json({ error: 'Profile not found' });
+
+    const streak = profile.completedSteps || 0;
+    const completedCount = (profile.completedTasks || []).length;
+
+    let insightText = '';
+    try {
+      const { text } = await callAI(
+        `Generate one short money habit insight for a user with a ${streak} day streak and ${completedCount} completed challenges. Return only the insight sentence.`,
+        null,
+        false
+      );
+      insightText = text.trim();
+    } catch (_) {
+      insightText = "You're building momentum. Keep stacking small wins.";
+    }
+
+    res.json({
+      title: 'Money Habits',
+      subtitle: 'Build habits that build wealth.',
+      activeTrackerTitle: 'Active Tracker',
+      trackers: [
+        {
+          id: 'morning_budget_check',
+          title: 'Morning Budget Check',
+          streak: `${streak} day streak`,
+          subtitle: 'Review your budget before your first spend.',
+          filledDots: Math.min(streak, 14),
+          totalDots: 14,
+        },
+        {
+          id: 'no_spend_mornings',
+          title: 'No-Spend Mornings',
+          streak: `${Math.max(streak - 2, 0)} day streak`,
+          subtitle: 'No spending before 11 AM.',
+          filledDots: 0,
+          totalDots: 0,
+        },
+        {
+          id: 'weekly_meal_prep',
+          title: 'Weekly Meal Prep',
+          streak: `${Math.max(streak - 4, 0)} day streak`,
+          subtitle: 'Prep meals every Sunday.',
+          filledDots: 0,
+          totalDots: 0,
+        },
+      ],
+      suggestedNewTitle: 'Suggested New Habits',
+      suggestions: [
+        {
+          id: 'purchase_rule',
+          title: 'The 30-Day Purchase Rule',
+          description: 'If you want it, write it down and wait 30 days.',
+          route: '/coach/should-i-buy',
+        },
+        {
+          id: 'gratitude_spending',
+          title: 'Gratitude Spending',
+          description: 'Log one grateful money moment daily.',
+          route: null,
+        },
+      ],
+      insight: { text: insightText },
+    });
+  } catch (err) {
+    console.error('MONEY HABITS ERROR:', err);
+    res.status(500).json({ error: err.message || 'Internal server error' });
+  }
+});
+
+
+
+
+app.get('/api/should-i-buy', authenticate, async (req, res) => {
+  try {
+    const itemName = (req.query.itemName || 'Headphones').toString();
+    const price = (req.query.price || '299').toString();
+    const category = (req.query.category || 'Electronics').toString();
+
+    let parsed = null;
+    try {
+      const prompt = `Analyze if this purchase is smart.
+Item: ${itemName}
+Price: $${price}
+Category: ${category}
+
+Return ONLY valid JSON with this structure:
+{
+  "assessment": {
+    "needVsWant": "Need vs Want",
+    "needPercent": "40%",
+    "wantPercent": "60%",
+    "items": [
+      {"icon": "money_off", "iconColor": "#EF4444", "title": "Budget Impact", "description": "This would use 30% of your monthly fun budget."},
+      {"icon": "access_time", "iconColor": "#EF4444", "title": "Goal Impact", "description": "Delays your emergency fund goal by 2 weeks."},
+      {"icon": "favorite", "iconColor": "#059669", "title": "Emotional Check", "description": "You're not buying out of stress. That's a win."}
+    ]
+  },
+  "considerThis": {
+    "title": "Consider This",
+    "description": "If you wait 48 hours, you'll know if it's a need or a want."
+  },
+  "aiSuggestion": {
+    "title": "AI Suggestion",
+    "description": "Wait until next payday. Your current savings rate will stay healthy."
+  }
+}`;
+
+      const { text } = await callAI(prompt, null, true);
+      parsed = JSON.parse(text);
+    } catch (_) {
+      parsed = null;
+    }
+
+    const fallbackItems = [
+      {
+        icon: 'money_off',
+        iconColor: '#EF4444',
+        title: 'Budget Impact',
+        description: 'This would use 30% of your monthly fun budget.',
+      },
+      {
+        icon: 'access_time',
+        iconColor: '#EF4444',
+        title: 'Goal Impact',
+        description: 'Delays your emergency fund goal by 2 weeks.',
+      },
+      {
+        icon: 'favorite',
+        iconColor: '#059669',
+        title: 'Emotional Check',
+        description: "You're not buying out of stress. That's a win.",
+      },
+    ];
+
+    const assessment = parsed?.assessment || {
+      needVsWant: 'Need vs Want',
+      needPercent: '40%',
+      wantPercent: '60%',
+      items: fallbackItems,
+    };
+
+    res.json({
+      title: 'Should I Buy?',
+      subtitle: 'Run it through MoneyMind first.',
+      proposedPurchase: {
+        label: 'PROPOSED PURCHASE',
+        itemName,
+        category,
+        priceLabel: 'Price',
+        price: `$${price}`,
+      },
+      assessment: {
+        title: 'MONEYMIND ASSESSMENT',
+        needVsWant: assessment.needVsWant || 'Need vs Want',
+        needPercent: assessment.needPercent || '40%',
+        wantPercent: assessment.wantPercent || '60%',
+        items: assessment.items || fallbackItems,
+      },
+      considerThis: parsed?.considerThis || {
+        title: 'Consider This',
+        description: 'If you wait 48 hours, you’ll know if it’s a need or a want.',
+      },
+      aiSuggestion: parsed?.aiSuggestion || {
+        title: 'AI Suggestion',
+        description: 'Wait until next payday. Your current savings rate will stay healthy.',
+      },
+      actions: {
+        waitButton: 'Wait',
+        buyButton: 'Buy',
+      },
+    });
+  } catch (err) {
+    console.error('SHOULD I BUY ERROR:', err);
+    res.status(500).json({ error: err.message || 'Internal server error' });
+  }
+});
+
 
 // ══════════════════════════════════════════════════════════════════════════════
 //  HEALTH CHECK & ERROR HANDLING
