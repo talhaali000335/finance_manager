@@ -4166,11 +4166,27 @@ app.get('/api/financial-journey', authenticate, async (req, res) => {
 // Sweep expired pending decisions for a user (call at the top of every
 // should-i-buy route so the list is always accurate on read).
 async function sweepExpiredDecisions(userId) {
-  await PurchaseDecision.deleteMany({
+  const expired = await PurchaseDecision.find({
     userId,
     status: 'pending',
     expiresAt: { $lte: new Date() },
   });
+
+  for (const decision of expired) {
+    // Auto-buy: create an Intent
+    await Intent.create({
+      userId: decision.userId,
+      amount: decision.price,
+      category: decision.category,
+      place: decision.itemName,
+      note: 'Auto-purchased after 48h (no decision)',
+      paymentMethod: '',
+    });
+
+    decision.status = 'bought';
+    decision.autoPurchased = true; // optional flag
+    await decision.save();
+  }
 }
 
 // ── Create a new pending "Should I Buy" decision ───────────────────────────────
