@@ -344,6 +344,77 @@ const ActiveChallenge = mongoose.model('ActiveChallenge', activeChallengeSchema)
 
 
 
+// ─── Purchase Decision Model ("Should I Buy") ─────────────────────────────────
+const purchaseDecisionSchema = new mongoose.Schema({
+  userId:      { type: String, required: true },
+  itemName:    { type: String, required: true },
+  price:       { type: Number, required: true },
+  category:    { type: String, default: 'General' },
+  status:      { type: String, enum: ['pending', 'bought', 'cancelled'], default: 'pending' },
+  assessment:  { type: Object, default: {} }, // cached AI assessment payload
+  expiresAt:   { type: Date, required: true }, // createdAt + 2 days
+}, { timestamps: true });
+
+purchaseDecisionSchema.index({ userId: 1, status: 1 });
+purchaseDecisionSchema.index({ expiresAt: 1 }); // for cleanup sweeps
+
+const PurchaseDecision = mongoose.model('PurchaseDecision', purchaseDecisionSchema);
+
+// ─── Habit Model ───────────────────────────────────────────────────────────────
+const habitSchema = new mongoose.Schema({
+  userId:       { type: String, required: true },
+  title:        { type: String, required: true },
+  subtitle:     { type: String, default: '' },
+  active:       { type: Boolean, default: true },
+  checkIns:     [{ type: Date }], // one entry per day the user tapped "done"
+  totalDots:    { type: Number, default: 14 }, // display window
+}, { timestamps: true });
+
+habitSchema.index({ userId: 1, active: 1 });
+
+const Habit = mongoose.model('Habit', habitSchema);
+
+// ─── Helper: same local calendar day check (Pakistan Standard Time, UTC+5) ─────
+const TZ_OFFSET_HOURS = 5;
+function isSameLocalDay(a, b) {
+  const toLocal = (d) => new Date(new Date(d).getTime() + TZ_OFFSET_HOURS * 60 * 60 * 1000);
+  const la = toLocal(a), lb = toLocal(b);
+  return la.getUTCFullYear() === lb.getUTCFullYear() &&
+         la.getUTCMonth() === lb.getUTCMonth() &&
+         la.getUTCDate() === lb.getUTCDate();
+}
+
+// Compute current streak from a sorted (or unsorted) list of check-in dates.
+// Streak = consecutive local days ending today or yesterday (grace for "not yet today").
+function computeStreak(checkIns) {
+  if (!checkIns || checkIns.length === 0) return 0;
+  const sorted = [...checkIns].map(d => new Date(d)).sort((a, b) => b - a); // newest first
+  const now = new Date();
+
+  // Must have checked in today or yesterday to have an active streak
+  const mostRecent = sorted[0];
+  const daysSinceMostRecent = Math.floor(
+    (new Date(new Date(now).getTime() + TZ_OFFSET_HOURS * 3600000).setUTCHours(0,0,0,0) -
+     new Date(new Date(mostRecent).getTime() + TZ_OFFSET_HOURS * 3600000).setUTCHours(0,0,0,0)) /
+    86400000
+  );
+  if (daysSinceMostRecent > 1) return 0; // streak broken
+
+  let streak = 1;
+  for (let i = 1; i < sorted.length; i++) {
+    const prevDay = new Date(new Date(sorted[i - 1]).getTime() + TZ_OFFSET_HOURS * 3600000);
+    prevDay.setUTCHours(0, 0, 0, 0);
+    const curDay = new Date(new Date(sorted[i]).getTime() + TZ_OFFSET_HOURS * 3600000);
+    curDay.setUTCHours(0, 0, 0, 0);
+    const diffDays = Math.round((prevDay - curDay) / 86400000);
+    if (diffDays === 1) streak++;
+    else if (diffDays === 0) continue; // duplicate same-day entry, ignore
+    else break;
+  }
+  return streak;
+}
+
+
 
 
 // ══════════════════════════════════════════════════════════════════════════════
@@ -4088,96 +4159,37 @@ app.get('/api/financial-journey', authenticate, async (req, res) => {
 });
 
 
-// Add near your other API routes
+// ══════════════════════════════════════════════════════════════════════════════
+//  SHOULD-I-BUY ROUTES (stateful)
+// ══════════════════════════════════════════════════════════════════════════════
 
-app.get('/api/money-habits', authenticate, async (req, res) => {
+// Sweep expired pending decisions for a user (call at the top of every
+// should-i-buy route so the list is always accurate on read).
+async function sweepExpiredDecisions(userId) {
+  await PurchaseDecision.deleteMany({
+    userId,
+    status: 'pending',
+    expiresAt: { $lte: new Date() },
+  });
+}
+
+// ── Create a new pending "Should I Buy" decision ───────────────────────────────
+app.post('/api/should-i-buy', authenticate, async (req, res) => {
   try {
-    const profile = await Profile.findOne({ userId: req.userId });
-    if (!profile) return res.status(404).json({ error: 'Profile not found' });
+    await sweepExpiredDecisions(req.userId);
 
-    const streak = profile.completedSteps || 0;
-    const completedCount = (profile.completedTasks || []).length;
+    const { itemName, price, category } = req.body;
+    if (!itemName || price == null)
+      return res.status(400).json({ error: 'itemName and price are required.' });
 
-    let insightText = '';
-    try {
-      const { text } = await callAI(
-        `Generate one short money habit insight for a user with a ${streak} day streak and ${completedCount} completed challenges. Return only the insight sentence.`,
-        null,
-        false
-      );
-      insightText = text.trim();
-    } catch (_) {
-      insightText = "You're building momentum. Keep stacking small wins.";
-    }
+    const parsedPrice = Number(price);
+    if (Number.isNaN(parsedPrice) || parsedPrice < 0)
+      return res.status(400).json({ error: 'price must be a valid non-negative number.' });
 
-    res.json({
-      title: 'Money Habits',
-      subtitle: 'Build habits that build wealth.',
-      activeTrackerTitle: 'Active Tracker',
-      trackers: [
-        {
-          id: 'morning_budget_check',
-          title: 'Morning Budget Check',
-          streak: `${streak} day streak`,
-          subtitle: 'Review your budget before your first spend.',
-          filledDots: Math.min(streak, 14),
-          totalDots: 14,
-        },
-        {
-          id: 'no_spend_mornings',
-          title: 'No-Spend Mornings',
-          streak: `${Math.max(streak - 2, 0)} day streak`,
-          subtitle: 'No spending before 11 AM.',
-          filledDots: 0,
-          totalDots: 0,
-        },
-        {
-          id: 'weekly_meal_prep',
-          title: 'Weekly Meal Prep',
-          streak: `${Math.max(streak - 4, 0)} day streak`,
-          subtitle: 'Prep meals every Sunday.',
-          filledDots: 0,
-          totalDots: 0,
-        },
-      ],
-      suggestedNewTitle: 'Suggested New Habits',
-      suggestions: [
-        {
-          id: 'purchase_rule',
-          title: 'The 30-Day Purchase Rule',
-          description: 'If you want it, write it down and wait 30 days.',
-          route: '/coach/should-i-buy',
-        },
-        {
-          id: 'gratitude_spending',
-          title: 'Gratitude Spending',
-          description: 'Log one grateful money moment daily.',
-          route: null,
-        },
-      ],
-      insight: { text: insightText },
-    });
-  } catch (err) {
-    console.error('MONEY HABITS ERROR:', err);
-    res.status(500).json({ error: err.message || 'Internal server error' });
-  }
-});
-
-
-
-
-app.get('/api/should-i-buy', authenticate, async (req, res) => {
-  try {
-    const itemName = (req.query.itemName || 'Headphones').toString();
-    const price = (req.query.price || '299').toString();
-    const category = (req.query.category || 'Electronics').toString();
-
-    let parsed = null;
-    try {
-      const prompt = `Analyze if this purchase is smart.
+    const prompt = `Analyze if this purchase is smart.
 Item: ${itemName}
-Price: $${price}
-Category: ${category}
+Price: $${parsedPrice}
+Category: ${category || 'General'}
 
 Return ONLY valid JSON with this structure:
 {
@@ -4186,88 +4198,213 @@ Return ONLY valid JSON with this structure:
     "needPercent": "40%",
     "wantPercent": "60%",
     "items": [
-      {"icon": "money_off", "iconColor": "#EF4444", "title": "Budget Impact", "description": "This would use 30% of your monthly fun budget."},
-      {"icon": "access_time", "iconColor": "#EF4444", "title": "Goal Impact", "description": "Delays your emergency fund goal by 2 weeks."},
-      {"icon": "favorite", "iconColor": "#059669", "title": "Emotional Check", "description": "You're not buying out of stress. That's a win."}
+      {"icon": "money_off", "iconColor": "#EF4444", "title": "Budget Impact", "description": "..."},
+      {"icon": "access_time", "iconColor": "#EF4444", "title": "Goal Impact", "description": "..."},
+      {"icon": "favorite", "iconColor": "#059669", "title": "Emotional Check", "description": "..."}
     ]
   },
-  "considerThis": {
-    "title": "Consider This",
-    "description": "If you wait 48 hours, you'll know if it's a need or a want."
-  },
-  "aiSuggestion": {
-    "title": "AI Suggestion",
-    "description": "Wait until next payday. Your current savings rate will stay healthy."
-  }
+  "considerThis": {"title": "Consider This", "description": "..."},
+  "aiSuggestion": {"title": "AI Suggestion", "description": "..."}
 }`;
 
+    let assessment;
+    try {
       const { text } = await callAI(prompt, null, true);
-      parsed = JSON.parse(text);
-    } catch (_) {
-      parsed = null;
+      assessment = extractJson(text);
+    } catch (err) {
+      console.error('❌ AI failed for should-i-buy, using fallback:', err.message);
+      assessment = {
+        needVsWant: 'Need vs Want', needPercent: '40%', wantPercent: '60%',
+        items: [
+          { icon: 'money_off', iconColor: '#EF4444', title: 'Budget Impact', description: 'This would use a chunk of your discretionary budget.' },
+          { icon: 'access_time', iconColor: '#EF4444', title: 'Goal Impact', description: 'Could delay progress on your active goal.' },
+          { icon: 'favorite', iconColor: '#059669', title: 'Emotional Check', description: "Take a moment to check if this is a want or a need." },
+        ],
+      };
     }
 
-    const fallbackItems = [
-      {
-        icon: 'money_off',
-        iconColor: '#EF4444',
-        title: 'Budget Impact',
-        description: 'This would use 30% of your monthly fun budget.',
-      },
-      {
-        icon: 'access_time',
-        iconColor: '#EF4444',
-        title: 'Goal Impact',
-        description: 'Delays your emergency fund goal by 2 weeks.',
-      },
-      {
-        icon: 'favorite',
-        iconColor: '#059669',
-        title: 'Emotional Check',
-        description: "You're not buying out of stress. That's a win.",
-      },
-    ];
+    const now = new Date();
+    const expiresAt = new Date(now.getTime() + 2 * 24 * 60 * 60 * 1000); // 2 days
 
-    const assessment = parsed?.assessment || {
-      needVsWant: 'Need vs Want',
-      needPercent: '40%',
-      wantPercent: '60%',
-      items: fallbackItems,
-    };
+    const decision = await PurchaseDecision.create({
+      userId: req.userId,
+      itemName,
+      price: parsedPrice,
+      category: category || 'General',
+      status: 'pending',
+      assessment,
+      expiresAt,
+    });
 
-    res.json({
+    res.status(201).json({
+      id: decision._id,
       title: 'Should I Buy?',
       subtitle: 'Run it through MoneyMind first.',
       proposedPurchase: {
         label: 'PROPOSED PURCHASE',
-        itemName,
-        category,
+        itemName: decision.itemName,
+        category: decision.category,
         priceLabel: 'Price',
-        price: `$${price}`,
+        price: `$${decision.price}`,
       },
-      assessment: {
-        title: 'MONEYMIND ASSESSMENT',
-        needVsWant: assessment.needVsWant || 'Need vs Want',
-        needPercent: assessment.needPercent || '40%',
-        wantPercent: assessment.wantPercent || '60%',
-        items: assessment.items || fallbackItems,
-      },
-      considerThis: parsed?.considerThis || {
-        title: 'Consider This',
-        description: 'If you wait 48 hours, you’ll know if it’s a need or a want.',
-      },
-      aiSuggestion: parsed?.aiSuggestion || {
-        title: 'AI Suggestion',
-        description: 'Wait until next payday. Your current savings rate will stay healthy.',
-      },
-      actions: {
-        waitButton: 'Wait',
-        buyButton: 'Buy',
-      },
+      assessment: { title: 'MONEYMIND ASSESSMENT', ...assessment },
+      status: decision.status,
+      expiresAt: decision.expiresAt,
+      actions: { waitButton: 'Wait', buyButton: 'Buy' },
     });
   } catch (err) {
-    console.error('SHOULD I BUY ERROR:', err);
+    console.error('SHOULD I BUY CREATE ERROR:', err);
     res.status(500).json({ error: err.message || 'Internal server error' });
+  }
+});
+
+// ── List pending decisions (the "area" showing active should-i-buy items) ──────
+app.get('/api/should-i-buy/pending', authenticate, async (req, res) => {
+  try {
+    await sweepExpiredDecisions(req.userId);
+    const pending = await PurchaseDecision.find({ userId: req.userId, status: 'pending' })
+      .sort({ createdAt: -1 });
+    res.json(pending.map(d => ({
+      id: d._id,
+      itemName: d.itemName,
+      price: d.price,
+      category: d.category,
+      assessment: d.assessment,
+      createdAt: d.createdAt,
+      expiresAt: d.expiresAt,
+    })));
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ── Buy: mark bought + log it as a real Intent so it shows in spending ─────────
+app.post('/api/should-i-buy/:id/buy', authenticate, async (req, res) => {
+  try {
+    const decision = await PurchaseDecision.findOne({ _id: req.params.id, userId: req.userId, status: 'pending' });
+    if (!decision) return res.status(404).json({ error: 'Pending decision not found.' });
+
+    const intent = await Intent.create({
+      userId: req.userId,
+      amount: decision.price,
+      category: decision.category,
+      place: decision.itemName,
+      note: 'Logged from Should I Buy',
+      paymentMethod: '',
+    });
+
+    decision.status = 'bought';
+    await decision.save();
+
+    res.json({ message: 'Purchase confirmed and logged.', intent });
+  } catch (err) {
+    console.error('SHOULD I BUY BUY ERROR:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ── Wait: cancel and remove from pending immediately ────────────────────────────
+app.post('/api/should-i-buy/:id/wait', authenticate, async (req, res) => {
+  try {
+    const decision = await PurchaseDecision.findOneAndDelete({ _id: req.params.id, userId: req.userId, status: 'pending' });
+    if (!decision) return res.status(404).json({ error: 'Pending decision not found.' });
+    res.json({ message: 'Decision removed.' });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ══════════════════════════════════════════════════════════════════════════════
+//  HABIT ROUTES (real check-in based streaks)
+// ══════════════════════════════════════════════════════════════════════════════
+
+// ── Start a new habit ────────────────────────────────────────────────────────
+app.post('/api/habits', authenticate, async (req, res) => {
+  try {
+    const { title, subtitle } = req.body;
+    if (!title) return res.status(400).json({ error: 'title is required.' });
+
+    const habit = await Habit.create({
+      userId: req.userId,
+      title,
+      subtitle: subtitle || '',
+      active: true,
+      checkIns: [],
+    });
+    res.status(201).json(habit);
+  } catch (err) {
+    console.error('HABIT CREATE ERROR:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ── List active habits with real streak/dots computed from checkIns ────────────
+app.get('/api/habits', authenticate, async (req, res) => {
+  try {
+    const habits = await Habit.find({ userId: req.userId, active: true }).sort({ createdAt: -1 });
+    const now = new Date();
+
+    const result = habits.map(h => {
+      const streak = computeStreak(h.checkIns);
+      const checkedInToday = h.checkIns.some(d => isSameLocalDay(d, now));
+      const filledDots = Math.min(streak, h.totalDots);
+      return {
+        id: h._id,
+        title: h.title,
+        subtitle: h.subtitle,
+        streakText: `${streak} day streak`,
+        filledDots,
+        totalDots: h.totalDots,
+        checkedInToday,
+      };
+    });
+
+    res.json(result);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ── Daily check-in (tap "done today") ───────────────────────────────────────────
+app.post('/api/habits/:id/check-in', authenticate, async (req, res) => {
+  try {
+    const habit = await Habit.findOne({ _id: req.params.id, userId: req.userId, active: true });
+    if (!habit) return res.status(404).json({ error: 'Habit not found.' });
+
+    const now = new Date();
+    const alreadyToday = habit.checkIns.some(d => isSameLocalDay(d, now));
+    if (alreadyToday) {
+      return res.status(409).json({ error: 'Already checked in today.' });
+    }
+
+    habit.checkIns.push(now);
+    await habit.save();
+
+    const streak = computeStreak(habit.checkIns);
+    res.json({
+      message: 'Checked in.',
+      streakText: `${streak} day streak`,
+      filledDots: Math.min(streak, habit.totalDots),
+      totalDots: habit.totalDots,
+    });
+  } catch (err) {
+    console.error('HABIT CHECK-IN ERROR:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ── Stop/cancel a habit ─────────────────────────────────────────────────────────
+app.delete('/api/habits/:id', authenticate, async (req, res) => {
+  try {
+    const habit = await Habit.findOneAndUpdate(
+      { _id: req.params.id, userId: req.userId },
+      { active: false },
+      { new: true }
+    );
+    if (!habit) return res.status(404).json({ error: 'Habit not found.' });
+    res.json({ message: 'Habit stopped.' });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
   }
 });
 
