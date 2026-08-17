@@ -456,8 +456,8 @@ function buildProviderChain() {
   const providers = [];
   if (GROQ_KEY) {
     providers.push(
-      { type: 'groq', model: 'llama-3.3-70b-versatile' },
-      { type: 'groq', model: 'llama-3.1-8b-instant' }
+      { type: 'groq', model: 'qwen/qwen3.6-27b' },
+      { type: 'groq', model: 'qwen/qwen3.6-27b' }
     );
   }
   if (GEMINI_KEY) {
