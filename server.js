@@ -456,8 +456,8 @@ function buildProviderChain() {
   const providers = [];
   if (GROQ_KEY) {
     providers.push(
-      { type: 'groq', model: 'qwen/qwen3.6-27b' },
-      { type: 'groq', model: 'qwen/qwen3.6-27b' }
+      { type: 'groq', model: 'qwen3.6-27b' },
+      { type: 'groq', model: 'qwen3.6-27b' }
     );
   }
   if (GEMINI_KEY) {
@@ -803,6 +803,210 @@ app.post('/api/goals/:id/documents', authenticate, (req, res) => {
     }
   });
 });
+
+
+
+
+
+
+// ══════════════════════════════════════════════════════════════════════════════
+//  GOAL MILESTONES ROUTE  –  paste inside server.js alongside the other /api/goals routes
+// ══════════════════════════════════════════════════════════════════════════════
+
+// GET /api/goals/milestones
+// Returns an AI-generated, data-driven milestone timeline for the user's
+// active goals.  Each milestone has:
+//   date        – human-readable date string
+//   title       – short action title
+//   description – one-sentence detail
+//   completed   – true if the milestone is already passed/achieved
+//   active      – true for the single "you are here" milestone
+//   isStar      – true for the final "financial freedom" milestone
+
+app.get('/api/goals/milestones', authenticate, async (req, res) => {
+  try {
+    const profile = await Profile.findOne({ userId: req.userId });
+    const goals   = await Goal.find({ userId: req.userId }).sort({ priority: -1 });
+
+    if (!goals.length) {
+      return res.json({ milestones: [] });
+    }
+
+    // ── Build real context for the AI ──────────────────────────────────────
+    const now         = new Date();
+    const income      = (profile?.primarySalary || 0) + (profile?.sideIncome || 0);
+    const expenses    = (profile?.rent || 0) + (profile?.food || 0) +
+                        (profile?.transport || 0) + (profile?.entertainment || 0) +
+                        (profile?.monthlyEMI || 0);
+    const monthlySavings = Math.max(income - expenses, 0);
+
+    const goalSummaries = goals.map(g => {
+      const target      = g.targetAmount || 0;
+      const saved       = g.existingSavings || 0;
+      const remaining   = Math.max(target - saved, 0);
+      const monthsLeft  = monthlySavings > 0
+        ? Math.ceil(remaining / monthlySavings)
+        : null;
+      const progressPct = target > 0 ? Math.round((saved / target) * 100) : 0;
+      const projectedDate = monthsLeft != null
+        ? new Date(now.getFullYear(), now.getMonth() + monthsLeft, 1)
+            .toLocaleDateString('en-US', { month: 'short', year: 'numeric' })
+        : 'Unknown';
+
+      return {
+        name:          g.name || g.goalType,
+        goalType:      g.goalType,
+        targetAmount:  target,
+        saved,
+        progressPct,
+        monthlyContribution: g.monthlyContribution || monthlySavings,
+        targetDate:    g.targetDate
+          ? new Date(g.targetDate).toLocaleDateString('en-US', { month: 'short', year: 'numeric' })
+          : 'No date set',
+        projectedDate,
+        autoTransfer:  g.autoTransfer,
+        riskTolerance: g.riskTolerance || 'conservative',
+      };
+    });
+
+    // ── AI prompt ──────────────────────────────────────────────────────────
+    const prompt = `
+You are a financial milestone planner. Based on the user's real goals and financial data, generate a milestone timeline for the "My Dreams" screen.
+
+USER DATA:
+- Monthly income: $${income}
+- Monthly expenses: $${expenses}
+- Estimated monthly savings available: $${monthlySavings}
+- Current date: ${now.toLocaleDateString('en-US', { month: 'short', year: 'numeric' })}
+- Goals: ${JSON.stringify(goalSummaries, null, 2)}
+
+INSTRUCTIONS:
+1. Generate between 4 and 6 milestones that map realistically to the user's goals and savings trajectory.
+2. Each milestone must be a concrete, achievable step (e.g., "25% of Dream Home saved", "Emergency fund complete").
+3. Mark milestones as completed if the goal's progressPct exceeds that milestone's threshold.
+4. Mark exactly ONE milestone as active (the next upcoming one the user should focus on).
+5. The last milestone should always be a star milestone representing full financial freedom.
+6. Use realistic dates derived from the projectedDate fields above.
+7. Never invent numbers — derive everything from the data.
+
+Return ONLY a JSON object with this exact structure, no extra text:
+{
+  "milestones": [
+    {
+      "date": "Jan 2025",
+      "title": "short milestone title (max 6 words)",
+      "description": "one-sentence detail about this milestone",
+      "completed": true,
+      "active": false,
+      "isStar": false
+    },
+    {
+      "date": "Mar 2025",
+      "title": "...",
+      "description": "...",
+      "completed": false,
+      "active": true,
+      "isStar": false
+    },
+    {
+      "date": "Future",
+      "title": "Financial Independence",
+      "description": "All goals achieved, passive income covers all expenses.",
+      "completed": false,
+      "active": false,
+      "isStar": true
+    }
+  ]
+}
+
+Rules:
+- completed + active cannot both be true for the same item.
+- Exactly one item should have active: true.
+- Exactly one item should have isStar: true (the last one).
+- Dates should be month + year strings like "Mar 2026" or "Future" for the star.
+`.trim();
+
+    let parsed;
+    try {
+      const { text } = await callAI(prompt, null, true);
+      parsed = extractJson(text);
+      if (!Array.isArray(parsed.milestones) || parsed.milestones.length < 2) {
+        throw new Error('Milestone list too short or malformed');
+      }
+    } catch (err) {
+      console.error('❌ AI failed for milestones, using fallback:', err.message);
+
+      // ── Deterministic fallback built from real goal data ──────────────
+      const primaryGoal = goalSummaries[0];
+      const p           = primaryGoal.progressPct;
+
+      parsed = {
+        milestones: [
+          {
+            date:        'Started',
+            title:       `${primaryGoal.name} goal set`,
+            description: `Target: $${primaryGoal.targetAmount.toLocaleString()} by ${primaryGoal.targetDate}.`,
+            completed:   true,
+            active:      false,
+            isStar:      false,
+          },
+          {
+            date:        'Milestone 1',
+            title:       '25% saved',
+            description: `Saved $${Math.round(primaryGoal.targetAmount * 0.25).toLocaleString()} toward ${primaryGoal.name}.`,
+            completed:   p >= 25,
+            active:      p >= 0 && p < 25,
+            isStar:      false,
+          },
+          {
+            date:        'Milestone 2',
+            title:       '50% halfway there',
+            description: `Halfway to $${primaryGoal.targetAmount.toLocaleString()} for ${primaryGoal.name}.`,
+            completed:   p >= 50,
+            active:      p >= 25 && p < 50,
+            isStar:      false,
+          },
+          {
+            date:        primaryGoal.projectedDate || primaryGoal.targetDate,
+            title:       `${primaryGoal.name} complete`,
+            description: `Fully funded at $${primaryGoal.targetAmount.toLocaleString()}.`,
+            completed:   p >= 100,
+            active:      p >= 50 && p < 100,
+            isStar:      false,
+          },
+          {
+            date:        'Future',
+            title:       'Financial Independence',
+            description: 'All goals achieved, passive income covers all expenses.',
+            completed:   false,
+            active:      false,
+            isStar:      true,
+          },
+        ],
+      };
+
+      // Ensure exactly one active flag in fallback
+      const hasActive = parsed.milestones.some(m => m.active);
+      if (!hasActive) {
+        const firstIncomplete = parsed.milestones.find(m => !m.completed && !m.isStar);
+        if (firstIncomplete) firstIncomplete.active = true;
+      }
+    }
+
+    res.json(parsed);
+  } catch (err) {
+    console.error('MILESTONES ENDPOINT ERROR:', err);
+    res.status(500).json({ error: err.message || 'Internal server error' });
+  }
+});
+
+
+
+
+
+
+
+
 
 // ══════════════════════════════════════════════════════════════════════════════
 //  PROFILE ROUTES
