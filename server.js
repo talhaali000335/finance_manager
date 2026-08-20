@@ -417,6 +417,23 @@ function computeStreak(checkIns) {
 
 
 
+// ─── Survey Answer Model ─────────────────────────────────────────────────────
+const surveyAnswerSchema = new mongoose.Schema({
+  userId:            { type: String, required: true },  // matches req.userId from auth middleware
+  questionId:        { type: String, required: true },
+  stepNumber:        { type: Number, required: true },
+  selectedOptionId:  { type: String, required: true },
+  selectedLabel:     { type: String, required: true },
+}, { timestamps: true });
+
+surveyAnswerSchema.index({ userId: 1, questionId: 1 });
+
+const SurveyAnswer = mongoose.model('SurveyAnswer', surveyAnswerSchema);
+
+
+
+
+
 // ══════════════════════════════════════════════════════════════════════════════
 //  HELPERS
 // ══════════════════════════════════════════════════════════════════════════════
@@ -4956,6 +4973,64 @@ app.get('/api/habits/suggestions', authenticate, async (req, res) => {
   }
 });
 
+
+
+
+
+
+
+// ══════════════════════════════════════════════════════════════════════════════
+//  SURVEY ANSWER ROUTES
+// ══════════════════════════════════════════════════════════════════════════════
+
+// Save a single survey answer
+app.post('/api/survey/answers', authenticate, async (req, res) => {
+  try {
+    const { questionId, stepNumber, selectedOptionId, selectedLabel } = req.body;
+
+    if (!questionId || !stepNumber || !selectedOptionId || !selectedLabel) {
+      return res.status(400).json({ error: 'Missing required fields.' });
+    }
+
+    const answer = await SurveyAnswer.create({
+      userId: req.userId,
+      questionId,
+      stepNumber,
+      selectedOptionId,
+      selectedLabel,
+    });
+
+    res.status(201).json({ success: true, answer });
+  } catch (err) {
+    console.error('SURVEY ANSWER SAVE ERROR:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Save multiple survey answers in one request
+app.post('/api/survey/answers/bulk', authenticate, async (req, res) => {
+  try {
+    const { answers } = req.body;
+
+    if (!Array.isArray(answers) || answers.length === 0) {
+      return res.status(400).json({ error: 'Answers array is required.' });
+    }
+
+    const formattedAnswers = answers.map(ans => ({
+      userId: req.userId,
+      questionId: ans.questionId,
+      stepNumber: ans.stepNumber,
+      selectedOptionId: ans.selectedOptionId,
+      selectedLabel: ans.selectedLabel,
+    }));
+
+    const savedAnswers = await SurveyAnswer.insertMany(formattedAnswers);
+    res.status(201).json({ success: true, savedAnswers });
+  } catch (err) {
+    console.error('SURVEY BULK SAVE ERROR:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
 
 
 
