@@ -451,79 +451,133 @@ const authenticate = async (req, res, next) => {
 
 
 
+// ══════════════════════════════════════════════════════════════════════════════
+//  AI PROVIDER HELPER (Groq primary → Gemini fallback)
+// ══════════════════════════════════════════════════════════════════════════════
 
 const GROQ_KEY   = process.env.GROQ_API_KEY;
 const GEMINI_KEY = process.env.GEMINI_API_KEY;
+
 function buildProviderChain() {
   const providers = [];
   if (GROQ_KEY) {
     providers.push(
-      { type: 'groq', model: 'qwen3.6-27b' },
-      { type: 'groq', model: 'qwen3.6-27b' }
+      { type: 'groq', model: 'llama-3.3-70b-versatile' },  // ✅ best free-tier
+      { type: 'groq', model: 'llama-3.1-8b-instant'    },  // ✅ fast fallback
+      { type: 'groq', model: 'gemma2-9b-it'             },  // ✅ last groq resort
     );
   }
   if (GEMINI_KEY) {
     providers.push(
-      { type: 'gemini', model: 'gemini-2.5-flash' },
-      { type: 'gemini', model: 'gemini-2.5-flash-lite' },
-      { type: 'gemini', model: 'gemini-3-flash-preview' }
+      { type: 'gemini', model: 'gemini-2.0-flash'      },  // ✅ replaces 1.5-flash
+      { type: 'gemini', model: 'gemini-2.5-flash'      },  // ✅ valid
+      { type: 'gemini', model: 'gemini-2.5-flash-lite' },  // ✅ lightest fallback
     );
   }
   return providers;
 }
+
 async function callAI(prompt, chatMessages = null, wantsJson = false) {
   const providers = buildProviderChain();
   if (providers.length === 0)
-    throw new Error('Server configuration error: no AI provider keys set (GROQ_API_KEY or GEMINI_API_KEY)');
+    throw new Error('No AI provider keys set (GROQ_API_KEY or GEMINI_API_KEY)');
+
   let lastError = null;
+
   for (const provider of providers) {
     try {
       console.log(`🔄 Trying provider: ${provider.type}/${provider.model}`);
       let text = null;
+
       if (provider.type === 'groq') {
         const messages = chatMessages && chatMessages.length
           ? chatMessages
           : [{ role: 'user', content: prompt }];
+
         const response = await fetch('https://api.groq.com/openai/v1/chat/completions', {
-          method: 'POST',
+          method:  'POST',
           headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${GROQ_KEY}` },
           body: JSON.stringify({
-            model: provider.model,
+            model:       provider.model,
             messages,
             temperature: 0.7,
+            max_tokens:  8192,
             ...(wantsJson ? { response_format: { type: 'json_object' } } : {}),
           }),
         });
+
+        // Rate-limit: skip to next provider immediately
+        if (response.status === 429) {
+          throw new Error(`Groq rate limit on ${provider.model}`);
+        }
+
         const data = await response.json();
-        if (!response.ok) throw new Error(data.error?.message || `Groq returned status ${response.status}`);
+        if (!response.ok)
+          throw new Error(data.error?.message || `Groq status ${response.status}`);
+
         text = data.choices?.[0]?.message?.content;
+
+        if (!text && data.choices?.[0]?.finish_reason === 'length')
+          throw new Error(`Groq ${provider.model} truncated`);
       }
+
       if (provider.type === 'gemini') {
+        // Build proper multi-turn history for Gemini
+        let contents;
+        if (chatMessages && chatMessages.length) {
+          contents = chatMessages.map(m => ({
+            role:  m.role === 'assistant' ? 'model' : 'user',
+            parts: [{ text: m.content }],
+          }));
+        } else {
+          contents = [{ role: 'user', parts: [{ text: prompt }] }];
+        }
+
         const response = await fetch(
           `https://generativelanguage.googleapis.com/v1beta/models/${provider.model}:generateContent?key=${GEMINI_KEY}`,
           {
-            method: 'POST',
+            method:  'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
-              contents: [{ role: 'user', parts: [{ text: prompt }] }],
-              ...(wantsJson ? { generationConfig: { responseMimeType: 'application/json' } } : {}),
+              contents,
+              generationConfig: {
+                temperature:     0.7,
+                maxOutputTokens: 8192,
+                ...(wantsJson ? { responseMimeType: 'application/json' } : {}),
+              },
             }),
           }
         );
+
+        if (response.status === 429)
+          throw new Error(`Gemini rate limit on ${provider.model}`);
+
         const data = await response.json();
-        if (!response.ok) throw new Error(data.error?.message || `Gemini returned status ${response.status}`);
+        if (!response.ok)
+          throw new Error(data.error?.message || `Gemini status ${response.status}`);
+
+        if (data.candidates?.[0]?.finishReason === 'SAFETY')
+          throw new Error(`Gemini ${provider.model} blocked by safety filter`);
+
         text = data.candidates?.[0]?.content?.parts?.[0]?.text;
       }
-      if (!text) throw new Error(`No content returned from ${provider.type}/${provider.model}`);
+
+      if (!text) throw new Error(`Empty response from ${provider.type}/${provider.model}`);
+
       console.log(`✅ Success with ${provider.type}/${provider.model}`);
       return { text, providerUsed: `${provider.type}/${provider.model}` };
+
     } catch (err) {
-      console.warn(`⚠️ Provider ${provider.type}/${provider.model} failed: ${err.message}`);
+      console.warn(`⚠️ ${provider.type}/${provider.model} failed: ${err.message}`);
       lastError = err;
+      // Small pause before trying next provider
+      await new Promise(r => setTimeout(r, 200));
     }
   }
+
   throw lastError || new Error('All AI providers are currently unavailable.');
 }
+
 function extractJson(text) {
   const cleaned = text.replace(/```json|```/g, '').trim();
   try {
@@ -531,15 +585,11 @@ function extractJson(text) {
   } catch (_) {
     const start = cleaned.indexOf('{');
     const end   = cleaned.lastIndexOf('}');
-    if (start !== -1 && end !== -1 && end > start) return JSON.parse(cleaned.slice(start, end + 1));
+    if (start !== -1 && end !== -1 && end > start)
+      return JSON.parse(cleaned.slice(start, end + 1));
     throw new Error('No valid JSON found in AI response');
   }
-} 
-
-
-
-
-
+}
 
 
 // ══════════════════════════════════════════════════════════════════════════════
