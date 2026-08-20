@@ -1002,7 +1002,135 @@ Rules:
 
 
 
+// ══════════════════════════════════════════════════════════════════════════════
+//  GOAL AI RECOMMENDATION  –  paste inside server.js with the other /api/goals routes
+// ══════════════════════════════════════════════════════════════════════════════
 
+// GET /api/goals/:id/recommendation
+// Returns an AI-generated recommendation + real growth-trend chart data
+// for a single goal.
+
+app.get('/api/goals/:id/recommendation', authenticate, async (req, res) => {
+  try {
+    const goal = await Goal.findOne({ _id: req.params.id, userId: req.userId });
+    if (!goal) return res.status(404).json({ error: 'Goal not found.' });
+
+    const profile = await Profile.findOne({ userId: req.userId });
+
+    // ── Real numbers ────────────────────────────────────────────────────────
+    const income        = (profile?.primarySalary || 0) + (profile?.sideIncome || 0);
+    const expenses      = (profile?.rent || 0) + (profile?.food || 0) +
+                          (profile?.transport || 0) + (profile?.entertainment || 0) +
+                          (profile?.monthlyEMI || 0);
+    const monthlySurplus = Math.max(income - expenses, 0);
+
+    const target     = goal.targetAmount || 0;
+    const saved      = goal.existingSavings || 0;
+    const remaining  = Math.max(target - saved, 0);
+    const now        = new Date();
+    const targetDate = goal.targetDate ? new Date(goal.targetDate) : null;
+    const monthsLeft = targetDate
+      ? Math.max(Math.ceil((targetDate - now) / (1000 * 60 * 60 * 24 * 30)), 1)
+      : 12;
+    const monthlyNeeded  = remaining / monthsLeft;
+    const weeklyNeeded   = monthlyNeeded / 4;
+    const gap            = monthlyNeeded - monthlySurplus; // positive = underfunded
+    const progressPct    = target > 0 ? Math.round((saved / target) * 100) : 0;
+
+    // ── Real growth chart from MonthlySnapshot (last 7 months) ────────────
+    const months = [];
+    for (let i = 6; i >= 0; i--) {
+      const d = new Date(now.getFullYear(), now.getMonth() - i, 1);
+      months.push({
+        key:   `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`,
+        label: d.toLocaleString('en-US', { month: 'short' }),
+      });
+    }
+
+    const snapshots = await MonthlySnapshot.find({
+      userId:   req.userId,
+      monthKey: { $in: months.map(m => m.key) },
+    });
+    const snapMap = {};
+    snapshots.forEach(s => { snapMap[s.monthKey] = s; });
+
+    // For the chart we show cumulative projected savings toward this goal
+    // (real snapshots where available, linear projection for future months)
+    let cumulative = saved;
+    const chartPoints = months.map(m => {
+      const snap = snapMap[m.key];
+      if (snap) {
+        // Real saved surplus for this month (proxy: income - expenses)
+        const monthSurplus = Math.max(snap.income - snap.expenses, 0);
+        cumulative = Math.min(cumulative + monthSurplus, target);
+      } else {
+        // Project using current surplus
+        cumulative = Math.min(cumulative + monthlySurplus, target);
+      }
+      return { label: m.label, value: Math.round(cumulative) };
+    });
+
+    // ── AI recommendation ────────────────────────────────────────────────────
+    const prompt = `
+You are a financial goal advisor. Based on the user's real data, write a concise, actionable recommendation.
+
+REAL DATA:
+- Goal: ${goal.name || goal.goalType}
+- Target: $${target}
+- Saved so far: $${saved} (${progressPct}%)
+- Months remaining: ${monthsLeft}
+- Monthly amount needed: $${monthlyNeeded.toFixed(0)}
+- Weekly amount needed: $${weeklyNeeded.toFixed(0)}
+- User's monthly surplus available: $${monthlySurplus.toFixed(0)}
+- Gap (monthly needed minus surplus): $${gap.toFixed(0)} ${gap > 0 ? '(underfunded)' : '(on track)'}
+- Auto-transfer enabled: ${goal.autoTransfer}
+- Risk tolerance: ${goal.riskTolerance || 'conservative'}
+
+Output ONLY a JSON object:
+{
+  "headline": "short punchy headline (max 8 words)",
+  "body": "2-sentence actionable insight grounded in the real numbers above",
+  "savingsBoostAmount": number (how much extra per week would help, based on real gap),
+  "monthsEarlier": number (realistic months earlier if boost is applied),
+  "actionLabel": "short CTA button label (max 4 words)"
+}
+
+If the user is on track (gap <= 0), reflect that positively. Never invent numbers.`.trim();
+
+    let ai = {};
+    try {
+      const { text } = await callAI(prompt, null, true);
+      ai = extractJson(text);
+      if (!ai.headline || !ai.body) throw new Error('Incomplete AI response');
+    } catch (err) {
+      console.error('❌ AI failed for goal recommendation:', err.message);
+      const boost = Math.max(Math.ceil(gap / 4), 10);
+      ai = {
+        headline: gap > 0 ? 'Small boost, big impact' : 'You\'re on track!',
+        body: gap > 0
+          ? `You need $${monthlyNeeded.toFixed(0)}/mo but have $${monthlySurplus.toFixed(0)} available. Adding $${boost}/week could accelerate your timeline.`
+          : `You have enough surplus ($${monthlySurplus.toFixed(0)}/mo) to hit your goal on time. Keep it up!`,
+        savingsBoostAmount: boost,
+        monthsEarlier: Math.max(Math.floor(boost * 4 / (monthlyNeeded || 1)), 1),
+        actionLabel: 'Boost savings',
+      };
+    }
+
+    res.json({
+      recommendation: ai,
+      chartPoints,         // [{ label: 'Jan', value: 4200 }, ...]
+      monthlyNeeded:  Math.round(monthlyNeeded),
+      weeklyNeeded:   Math.round(weeklyNeeded),
+      dailyNeeded:    Math.round(monthlyNeeded / 30),
+      progressPct,
+      monthsLeft,
+      onTrack:        gap <= 0,
+    });
+  } catch (err) {
+    console.error('GOAL RECOMMENDATION ERROR:', err);
+    res.status(500).json({ error: err.message || 'Internal server error' });
+  }
+});
 
 
 
