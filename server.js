@@ -735,74 +735,8 @@ app.post('/api/goals', authenticate, async (req, res) => {
   }
 });
 
-app.patch('/api/goals/:id', authenticate, async (req, res) => {
-  try {
-    const goal = await Goal.findOneAndUpdate(
-      { _id: req.params.id, userId: req.userId },
-      { $set: req.body },
-      { new: true, runValidators: true }
-    );
-    if (!goal) return res.status(404).json({ error: 'Goal not found' });
-    res.json(goal);
-  } catch (err) {
-    res.status(400).json({ error: err.message });
-  }
-});
 
-app.get('/api/goals', authenticate, async (req, res) => {
-  try {
-    const goals = await Goal.find({ userId: req.userId }).sort({ createdAt: -1 });
-    res.json(goals);
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-});
 
-app.get('/api/goals/:id', authenticate, async (req, res) => {
-  try {
-    const goal = await Goal.findOne({ _id: req.params.id, userId: req.userId });
-    if (!goal) return res.status(404).json({ error: 'Goal not found' });
-    res.json(goal);
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-});
-
-app.delete('/api/goals/:id', authenticate, async (req, res) => {
-  try {
-    const goal = await Goal.findOneAndDelete({ _id: req.params.id, userId: req.userId });
-    if (!goal) return res.status(404).json({ error: 'Goal not found' });
-    res.json({ message: 'Goal deleted successfully' });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-});
-
-// ✅ Upload document to a goal
-app.post('/api/goals/:id/documents', authenticate, (req, res) => {
-  uploadAppDocs(req, res, async (err) => {
-    if (err) return res.status(400).json({ error: err.message });
-    try {
-      const goal = await Goal.findOne({ _id: req.params.id, userId: req.userId });
-      if (!goal) return res.status(404).json({ error: 'Goal not found' });
-      if (!req.files || req.files.length === 0)
-        return res.status(400).json({ error: 'At least one file is required.' });
-
-      const docs = [];
-      for (const file of req.files) {
-        const result = await uploadToCloudinary(file.buffer, 'finpath/goal_documents');
-        docs.push({ originalName: file.originalname, url: result.secure_url, publicId: result.public_id });
-      }
-
-      goal.documents.push(...docs);
-      await goal.save();
-      res.status(201).json({ message: 'Documents uploaded.', goal });
-    } catch (error) {
-      console.error('Goal document upload error:', error);
-      res.status(500).json({ error: 'Server error.' });
-    }
-  });
-});
 
 
 
@@ -999,6 +933,99 @@ Rules:
     res.status(500).json({ error: err.message || 'Internal server error' });
   }
 });
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+app.patch('/api/goals/:id', authenticate, async (req, res) => {
+  try {
+    const goal = await Goal.findOneAndUpdate(
+      { _id: req.params.id, userId: req.userId },
+      { $set: req.body },
+      { new: true, runValidators: true }
+    );
+    if (!goal) return res.status(404).json({ error: 'Goal not found' });
+    res.json(goal);
+  } catch (err) {
+    res.status(400).json({ error: err.message });
+  }
+});
+
+app.get('/api/goals', authenticate, async (req, res) => {
+  try {
+    const goals = await Goal.find({ userId: req.userId }).sort({ createdAt: -1 });
+    res.json(goals);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.get('/api/goals/:id', authenticate, async (req, res) => {
+  try {
+    const goal = await Goal.findOne({ _id: req.params.id, userId: req.userId });
+    if (!goal) return res.status(404).json({ error: 'Goal not found' });
+    res.json(goal);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.delete('/api/goals/:id', authenticate, async (req, res) => {
+  try {
+    const goal = await Goal.findOneAndDelete({ _id: req.params.id, userId: req.userId });
+    if (!goal) return res.status(404).json({ error: 'Goal not found' });
+    res.json({ message: 'Goal deleted successfully' });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ✅ Upload document to a goal
+app.post('/api/goals/:id/documents', authenticate, (req, res) => {
+  uploadAppDocs(req, res, async (err) => {
+    if (err) return res.status(400).json({ error: err.message });
+    try {
+      const goal = await Goal.findOne({ _id: req.params.id, userId: req.userId });
+      if (!goal) return res.status(404).json({ error: 'Goal not found' });
+      if (!req.files || req.files.length === 0)
+        return res.status(400).json({ error: 'At least one file is required.' });
+
+      const docs = [];
+      for (const file of req.files) {
+        const result = await uploadToCloudinary(file.buffer, 'finpath/goal_documents');
+        docs.push({ originalName: file.originalname, url: result.secure_url, publicId: result.public_id });
+      }
+
+      goal.documents.push(...docs);
+      await goal.save();
+      res.status(201).json({ message: 'Documents uploaded.', goal });
+    } catch (error) {
+      console.error('Goal document upload error:', error);
+      res.status(500).json({ error: 'Server error.' });
+    }
+  });
+});
+
+
+
+
+
 
 
 
