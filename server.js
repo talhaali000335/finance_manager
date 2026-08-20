@@ -462,21 +462,20 @@ function buildProviderChain() {
   const providers = [];
   if (GROQ_KEY) {
     providers.push(
-      { type: 'groq', model: 'llama-3.3-70b-versatile' },  // ✅ best free-tier
-      { type: 'groq', model: 'llama-3.1-8b-instant'    },  // ✅ fast fallback
-      { type: 'groq', model: 'gemma2-9b-it'             },  // ✅ last groq resort
+      { type: 'groq', model: 'llama-3.3-70b-versatile' },
+      { type: 'groq', model: 'llama-3.1-8b-instant' },
+      { type: 'groq', model: 'gemma2-9b-it' },
     );
   }
   if (GEMINI_KEY) {
     providers.push(
-      { type: 'gemini', model: 'gemini-2.0-flash'      },  // ✅ replaces 1.5-flash
-      { type: 'gemini', model: 'gemini-2.5-flash'      },  // ✅ valid
-      { type: 'gemini', model: 'gemini-2.5-flash-lite' },  // ✅ lightest fallback
+      { type: 'gemini', model: 'gemini-2.0-flash' },
+      { type: 'gemini', model: 'gemini-2.5-flash' },
+      { type: 'gemini', model: 'gemini-3.5-flash-lite' }, // ← was gemini-2.5-flash-lite
     );
   }
   return providers;
 }
-
 async function callAI(prompt, chatMessages = null, wantsJson = false) {
   const providers = buildProviderChain();
   if (providers.length === 0)
