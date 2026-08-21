@@ -5303,6 +5303,141 @@ app.post('/api/ai/goal-celebration', authenticate, async (req, res) => {
   }
 });
 
+
+
+
+
+
+
+
+// GET /api/goals/milestones
+app.get('/api/goals/milestones', authenticate, async (req, res) => {
+  try {
+    const profile = await Profile.findOne({ userId: req.userId });
+    const goals   = await Goal.find({ userId: req.userId }).sort({ priority: -1 });
+
+    if (!goals.length) {
+      return res.json({ milestones: [] });
+    }
+
+    // ── Build real context for the AI ──────────────────────────────────────
+    const now           = new Date();
+    const income        = (profile?.primarySalary || 0) + (profile?.sideIncome || 0);
+    const expenses      = (profile?.rent || 0) + (profile?.food || 0) +
+                          (profile?.transport || 0) + (profile?.entertainment || 0) +
+                          (profile?.monthlyEMI || 0);
+    const monthlySavings = Math.max(income - expenses, 0);
+
+    const goalSummaries = goals.map(g => {
+      const target      = g.targetAmount || 0;
+      const saved       = g.existingSavings || 0;
+      const remaining   = Math.max(target - saved, 0);
+      const monthsLeft  = monthlySavings > 0
+        ? Math.ceil(remaining / monthlySavings)
+        : null;
+      const progressPct = target > 0 ? Math.round((saved / target) * 100) : 0;
+      const projectedDate = monthsLeft != null
+        ? new Date(now.getFullYear(), now.getMonth() + monthsLeft, 1)
+            .toLocaleDateString('en-US', { month: 'short', year: 'numeric' })
+        : 'Unknown';
+
+      return {
+        name:          g.name || g.goalType,
+        goalType:      g.goalType,
+        targetAmount:  target,
+        saved,
+        progressPct,
+        monthlyContribution: g.monthlyContribution || monthlySavings,
+        targetDate:    g.targetDate
+          ? new Date(g.targetDate).toLocaleDateString('en-US', { month: 'short', year: 'numeric' })
+          : 'No date set',
+        projectedDate,
+        autoTransfer:  g.autoTransfer,
+        riskTolerance: g.riskTolerance || 'conservative',
+      };
+    });
+
+    // ── AI prompt ──────────────────────────────────────────────────────────
+    const prompt = `
+You are a financial milestone planner. Based on the user's real goals and financial data, generate a milestone timeline for the "My Dreams" screen.
+
+USER DATA:
+- Monthly income: $${income}
+- Monthly expenses: $${expenses}
+- Estimated monthly savings available: $${monthlySavings}
+- Current date: ${now.toLocaleDateString('en-US', { month: 'short', year: 'numeric' })}
+- Goals: ${JSON.stringify(goalSummaries, null, 2)}
+
+INSTRUCTIONS:
+1. Generate between 4 and 6 milestones that map realistically to the user's goals and savings trajectory.
+2. Each milestone must be a concrete, achievable step (e.g., "25% of Dream Home saved", "Emergency fund complete").
+3. Mark milestones as completed if the goal's progressPct exceeds that milestone's threshold.
+4. Mark exactly ONE milestone as active (the next upcoming one the user should focus on).
+5. The last milestone should always be a star milestone representing full financial freedom.
+6. Use realistic dates derived from the projectedDate fields above.
+7. Never invent numbers — derive everything from the data.
+
+Return ONLY a JSON object with this exact structure:
+{
+  "milestones": [
+    {
+      "date": "Jan 2025",
+      "title": "short milestone title (max 6 words)",
+      "description": "one-sentence detail about this milestone",
+      "completed": true,
+      "active": false,
+      "isStar": false
+    },
+    {
+      "date": "Mar 2025",
+      "title": "...",
+      "description": "...",
+      "completed": false,
+      "active": true,
+      "isStar": false
+    },
+    {
+      "date": "Future",
+      "title": "Financial Independence",
+      "description": "All goals achieved, passive income covers all expenses.",
+      "completed": false,
+      "active": false,
+      "isStar": true
+    }
+  ]
+}`.trim();
+
+    let parsed;
+    try {
+      const { text } = await callAI(prompt, null, true);
+      parsed = extractJson(text);
+      if (!Array.isArray(parsed.milestones) || parsed.milestones.length < 2) {
+        throw new Error('Milestone list too short or malformed');
+      }
+    } catch (err) {
+      console.error('❌ AI failed for milestones, using fallback:', err.message);
+      parsed = fallbackMilestones(goalSummaries);
+    }
+
+    res.json(parsed);
+  } catch (err) {
+    console.error('MILESTONES ENDPOINT ERROR:', err);
+    res.status(500).json({ error: err.message || 'Internal server error' });
+  }
+});
+
+
+
+
+
+
+
+
+
+
+
+
+
 // ══════════════════════════════════════════════════════════════════════════════
 //  HEALTH CHECK & ERROR HANDLING
 // ══════════════════════════════════════════════════════════════════════════════
