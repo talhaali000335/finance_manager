@@ -5035,6 +5035,131 @@ app.post('/api/survey/answers/bulk', authenticate, async (req, res) => {
 
 
 
+// ─── Survey Analyze: reads all answers + profile + goals, returns archetype ──
+app.post('/api/survey/analyze', authenticate, async (req, res) => {
+  try {
+    const answers = await SurveyAnswer.find({ userId: req.userId })
+      .sort({ stepNumber: 1 });
+    const profile = await Profile.findOne({ userId: req.userId });
+    const goals   = await Goal.find({ userId: req.userId });
+
+    if (!answers || answers.length === 0) {
+      return res.status(400).json({
+        error: 'No survey answers found. Complete the survey first.',
+      });
+    }
+
+    // Build a readable answer summary for the AI
+    const answerSummary = answers
+      .map(a => `Step ${a.stepNumber}: "${a.selectedLabel}"`)
+      .join('\n');
+
+    const income   = profile
+      ? (profile.primarySalary || 0) + (profile.sideIncome || 0)
+      : 0;
+    const expenses = profile
+      ? (profile.rent || 0) + (profile.food || 0) + (profile.transport || 0) +
+        (profile.entertainment || 0) + (profile.monthlyEMI || 0)
+      : 0;
+    const primaryGoal = goals.sort((a, b) => (b.priority || 0) - (a.priority || 0))[0];
+
+    const DEFAULT_AVATAR =
+      'https://lh3.googleusercontent.com/aida-public/AB6AXuA_yTB42NpTW0F-beY2jjPaossXseQ2W_2sB4_lTgU1nJkq8K4pSsIq-h7ZNHlOrP2271I138pTexPzYPkNZdtse2tjekJtUJ7axWoWJXzqvaiZHh8QaTz0tFkLAp_NUITBLW5mnq5Sa5T9iJQOPaEepGGXVrxi9kuR1PzGcdiu0Geq6lEiV7C_jUO2Wycn7XdTgpIybisvG69d5wnD1e8RTLTFdR1lwTil_6e44jm54DL027oDKu_b';
+
+    const prompt = `
+You are an empathetic financial personality coach. Based on the user's survey answers,
+generate a personalised financial archetype and roadmap.
+
+SURVEY ANSWERS (${answers.length} total):
+${answerSummary}
+
+FINANCIAL CONTEXT:
+- Monthly income: $${income}
+- Monthly expenses: $${expenses}
+- Primary goal: ${primaryGoal ? `${primaryGoal.name || primaryGoal.goalType}, target $${primaryGoal.targetAmount}` : 'none set'}
+
+Return ONLY a valid JSON object with this exact structure — no markdown, no extra text:
+{
+  "archetype": "2-3 word archetype name e.g. Dream Builder",
+  "archetypeSubtitle": "short descriptor e.g. Optimistic & Mindful",
+  "quote": "one sentence capturing their money mindset (max 20 words)",
+  "profileImageUrl": "${DEFAULT_AVATAR}",
+  "psychologyNotes": [
+    "first insight about their money psychology (max 10 words)",
+    "second insight",
+    "third insight"
+  ],
+  "roadmapSteps": [
+    { "title": "Today",          "description": "Starting your journey",                  "isActive": true,  "isCompleted": false, "iconType": "circle" },
+    { "title": "Better Habits",  "description": "Building mindful money routines",         "isActive": false, "isCompleted": false, "iconType": "circle" },
+    { "title": "Emergency Fund", "description": "Your safety net for peace of mind",       "isActive": false, "isCompleted": false, "iconType": "circle" },
+    { "title": "Dream Goal",     "description": "Financial freedom and wealth mapping",    "isActive": false, "isCompleted": false, "iconType": "star"   }
+  ],
+  "finalRoadmapSteps": [
+    { "title": "Better Habits",     "description": "Building mindful money routines",      "isActive": true,  "isCompleted": false, "iconType": "circle" },
+    { "title": "Emergency Fund",    "description": "Your safety net for peace of mind",    "isActive": false, "isCompleted": false, "iconType": "circle" },
+    { "title": "Dream Goal",        "description": "Working toward what matters most",     "isActive": false, "isCompleted": false, "iconType": "circle" },
+    { "title": "Financial Freedom", "description": "Making peace with cash flow",          "isActive": false, "isCompleted": false, "iconType": "star"   }
+  ]
+}
+
+Personalise the archetype name, subtitle, quote, psychologyNotes, and roadmap descriptions
+based on the actual survey answers above. Make them specific and personal, not generic.
+`.trim();
+
+    let parsed;
+    try {
+      const { text } = await callAI(prompt, null, true);
+      parsed = extractJson(text);
+      if (!parsed.archetype || !Array.isArray(parsed.roadmapSteps)) {
+        throw new Error('Incomplete AI response');
+      }
+      // Always keep the avatar URL we supply, in case the AI replaces it
+      parsed.profileImageUrl = DEFAULT_AVATAR;
+    } catch (err) {
+      console.error('❌ Survey analyze AI failed:', err.message);
+      // Deterministic fallback derived from the actual answers
+      const labels = answers.map(a => (a.selectedLabel || '').toLowerCase());
+      const optimistic = labels.some(l =>
+        l.includes('confident') || l.includes('excited') ||
+        l.includes('freedom') || l.includes('save consistently'));
+      parsed = {
+        archetype:         optimistic ? 'Dream Builder'    : 'Mindful Achiever',
+        archetypeSubtitle: optimistic ? 'Optimistic & Future-Focused' : 'Steady & Intentional',
+        quote: optimistic
+          ? 'You see money as a tool to build the life you imagine.'
+          : 'You believe consistent small steps lead to lasting change.',
+        profileImageUrl: DEFAULT_AVATAR,
+        psychologyNotes: [
+          'Highly motivated by long-term vision',
+          'Occasional friction between present joy and future planning',
+          'Emotionally driven to build security for loved ones',
+        ],
+        roadmapSteps: [
+          { title: 'Today',          description: 'Starting your journey',               isActive: true,  isCompleted: false, iconType: 'circle' },
+          { title: 'Better Habits',  description: 'Building mindful money routines',      isActive: false, isCompleted: false, iconType: 'circle' },
+          { title: 'Emergency Fund', description: 'Your safety net for peace of mind',    isActive: false, isCompleted: false, iconType: 'circle' },
+          { title: 'Dream Goal',     description: 'Financial freedom and wealth mapping', isActive: false, isCompleted: false, iconType: 'star'   },
+        ],
+        finalRoadmapSteps: [
+          { title: 'Better Habits',     description: 'Building mindful money routines',   isActive: true,  isCompleted: false, iconType: 'circle' },
+          { title: 'Emergency Fund',    description: 'Your safety net for peace of mind', isActive: false, isCompleted: false, iconType: 'circle' },
+          { title: 'Dream Goal',        description: 'Working toward what matters most',  isActive: false, isCompleted: false, iconType: 'circle' },
+          { title: 'Financial Freedom', description: 'Making peace with cash flow',       isActive: false, isCompleted: false, iconType: 'star'   },
+        ],
+      };
+    }
+
+    res.json(parsed);
+  } catch (err) {
+    console.error('SURVEY ANALYZE ERROR:', err);
+    res.status(500).json({ error: err.message || 'Internal server error' });
+  }
+});
+
+
+
+
 
 // ══════════════════════════════════════════════════════════════════════════════
 //  HEALTH CHECK & ERROR HANDLING
