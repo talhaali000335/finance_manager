@@ -5159,7 +5159,149 @@ based on the actual survey answers above. Make them specific and personal, not g
 
 
 
+// GET /api/goals/:goalId/completion
+app.get('/api/goals/:goalId/completion', authenticate, async (req, res) => {
+  try {
+    const { goalId } = req.params;
+    const goal = await Goal.findOne({ _id: goalId, userId: req.userId });
+    if (!goal) return res.status(404).json({ error: 'Goal not found.' });
 
+    const user = await User.findById(req.userId).select('name profilePictureUrl');
+
+    // Calculate days taken to reach the goal (from creation to completion)
+    const startDate = new Date(goal.createdAt || Date.now());
+    const endDate = goal.completedAt ? new Date(goal.completedAt) : new Date();
+    const daysToReach = Math.max(1, Math.ceil((endDate - startDate) / (1000 * 60 * 60 * 24)));
+
+    // Days ahead: targetDate (original) minus actual completion date
+    let daysAhead = 0;
+    if (goal.targetDate && goal.completedAt) {
+      const target = new Date(goal.targetDate);
+      const actual = new Date(goal.completedAt);
+      daysAhead = Math.max(0, Math.ceil((target - actual) / (1000 * 60 * 60 * 24)));
+    }
+
+    // Find next active goal (not completed and not the current one)
+    const nextGoal = await Goal.findOne({
+      userId: req.userId,
+      _id: { $ne: goalId },
+      completedAt: { $exists: false }, // adjust if you have a status field
+    }).sort({ priority: -1, createdAt: -1 }).limit(1);
+
+    res.json({
+      data: {
+        _id: goal._id,
+        goalName: goal.name || goal.goalType,
+        targetAmount: goal.targetAmount,
+        achievedAmount: goal.existingSavings || goal.targetAmount,
+        currency: 'USD', // or from profile if stored
+        daysToReach,
+        daysAhead,
+        completedAt: goal.completedAt || new Date(),
+        userName: user?.name || 'Champion',
+        trophyImageUrl: goal.trophyImageUrl || null,
+        nextGoal: nextGoal ? {
+          name: nextGoal.name || nextGoal.goalType,
+          targetAmount: nextGoal.targetAmount
+        } : null
+      }
+    });
+  } catch (err) {
+    console.error('GOAL COMPLETION FETCH ERROR:', err);
+    res.status(500).json({ error: 'Server error.' });
+  }
+});
+
+
+
+
+
+
+// POST /api/ai/goal-celebration
+app.post('/api/ai/goal-celebration', authenticate, async (req, res) => {
+  try {
+    const { goalName, targetAmount, daysToReach, daysAhead, userName, currency } = req.body;
+
+    const prompt = `
+      Generate a financial goal celebration for a user. Return ONLY raw JSON.
+      User: ${userName || 'Champion'}
+      Goal: ${goalName}
+      Target: ${currency} ${targetAmount}
+      Days taken: ${daysToReach}
+      Days ahead of schedule: ${daysAhead}
+
+      JSON fields (all strings):
+      headline        — short, exciting, emoji-first (≤10 words)
+      subHeadline     — one encouraging sentence (≤20 words)
+      badgeTitle      — achievement badge name (≤4 words)
+      badgeSubtitle   — badge description (≤8 words)
+      motivationalQuote — inspiring quote for their next step (≤30 words)
+    `;
+
+    let aiText = null;
+
+    // 1) Try Anthropic if configured
+    if (process.env.ANTHROPIC_API_KEY) {
+      try {
+        const aiRes = await fetch('https://api.anthropic.com/v1/messages', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'x-api-key': process.env.ANTHROPIC_API_KEY,
+            'anthropic-version': '2023-06-01',
+          },
+          body: JSON.stringify({
+            model: 'claude-sonnet-4-6',
+            max_tokens: 400,
+            messages: [{ role: 'user', content: prompt }],
+          }),
+        });
+        const aiBody = await aiRes.json();
+        if (aiBody.content && aiBody.content[0]?.text) {
+          aiText = aiBody.content[0].text;
+        }
+      } catch (_) { /* fall through */ }
+    }
+
+    // 2) Fallback to Groq/Gemini using your existing callAI helper
+    if (!aiText && (process.env.GROQ_API_KEY || process.env.GEMINI_API_KEY)) {
+      try {
+        const result = await callAI(prompt, null, true); // returns { text, providerUsed }
+        aiText = result.text;
+      } catch (_) { /* ignore */ }
+    }
+
+    // 3) Final graceful fallback
+    if (!aiText) {
+      return res.json({
+        data: {
+          headline: `🎉 You crushed it, ${userName || 'Champion'}!`,
+          subHeadline: `You reached ${goalName || 'your goal'}!`,
+          badgeTitle: 'Goal Crusher',
+          badgeSubtitle: 'Financial Achievement',
+          motivationalQuote: 'You turned discipline into freedom. Now aim higher.',
+        },
+      });
+    }
+
+    // Clean markdown fences and parse
+    const cleaned = aiText.replace(/```json|```/g, '').trim();
+    const parsed = JSON.parse(cleaned);
+    res.json({ data: parsed });
+  } catch (err) {
+    console.error('AI GOAL CELEBRATION ERROR:', err);
+    // Always return a valid response
+    res.json({
+      data: {
+        headline: `🎉 You crushed it, ${req.body.userName || 'Champion'}!`,
+        subHeadline: `You reached ${req.body.goalName || 'your goal'}!`,
+        badgeTitle: 'Goal Crusher',
+        badgeSubtitle: 'Financial Achievement',
+        motivationalQuote: 'You turned discipline into freedom. Now aim higher.',
+      },
+    });
+  }
+});
 
 // ══════════════════════════════════════════════════════════════════════════════
 //  HEALTH CHECK & ERROR HANDLING
