@@ -4911,6 +4911,63 @@ app.post('/api/should-i-buy/:id/wait', authenticate, async (req, res) => {
   }
 });
 
+
+
+
+
+// GET /api/should-i-buy/:decisionId/analysis
+app.get('/api/should-i-buy/:decisionId/analysis', authenticate, async (req, res) => {
+  try {
+    const { decisionId } = req.params;
+    const decision = await PurchaseDecision.findOne({ _id: decisionId, userId: req.userId });
+    if (!decision) return res.status(404).json({ error: 'Decision not found.' });
+
+    // Build prompt for AI based on decision data
+    const prompt = `
+      Analyze this purchase decision for a user.
+      Item: ${decision.itemName}
+      Category: ${decision.category}
+      Price: $${decision.price}
+
+      Generate:
+      - needPercent and wantPercent (numbers 0-100)
+      - assessment items (budget impact, goal impact, emotional check)
+      - considerThis (a helpful alternative or insight)
+      - aiSuggestion (a short, actionable advice)
+    `;
+
+    // Use your existing callAI helper (Groq/Gemini/Anthropic)
+    const aiText = await callAI(prompt, null, true);
+    const cleaned = aiText.replace(/```json|```/g, '').trim();
+    const aiData = JSON.parse(cleaned);
+
+    // Combine with decision info
+    const responseData = {
+      proposedPurchase: {
+        itemName: decision.itemName,
+        category: decision.category,
+        price: decision.price
+      },
+      assessment: {
+        needPercent: aiData.needPercent || 40,
+        wantPercent: aiData.wantPercent || 60,
+        items: aiData.items || []
+      },
+      considerThis: aiData.considerThis || '',
+      aiSuggestion: aiData.aiSuggestion || '',
+      actions: {
+        waitButton: 'I\'ll Wait',
+        buyButton: 'Buy Now'
+      }
+    };
+
+    res.json({ data: responseData });
+  } catch (err) {
+    console.error('AI SHOULD-I-BUY ERROR:', err);
+    res.status(500).json({ error: 'Server error.' });
+  }
+});
+
 // ══════════════════════════════════════════════════════════════════════════════
 //  HABIT ROUTES (real check-in based streaks)
 // ══════════════════════════════════════════════════════════════════════════════
