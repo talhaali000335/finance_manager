@@ -1223,6 +1223,108 @@ If the user is on track (gap <= 0), reflect that positively. Never invent number
 });
 
 
+// ══════════════════════════════════════════════════════════════════════════════
+//  ADD THESE TWO ROUTES TO YOUR server.js
+//  Place them alongside your other /api/goals/* routes.
+// ══════════════════════════════════════════════════════════════════════════════
+
+// ── GET /api/goals/:id/completion ─────────────────────────────────────────────
+// Returns goal completion data for the celebration screen.
+// Works even if the goal is still at 100% stored in DB.
+app.get('/api/goals/:id/completion', authenticate, async (req, res) => {
+  try {
+    const goal = await Goal.findOne({ _id: req.params.id, userId: req.userId });
+    if (!goal) return res.status(404).json({ error: 'Goal not found' });
+
+    const user = await User.findById(req.userId).select('name');
+
+    // Days to reach: days between goal creation and now (or completion date)
+    const createdAt = goal.createdAt || goal._id.getTimestamp();
+    const completedAt = new Date(); // approximate as "now" since we don't store completion date
+    const daysToReach = Math.max(
+      Math.floor((completedAt - createdAt) / (1000 * 60 * 60 * 24)),
+      1
+    );
+
+    // Days ahead: difference between target date and actual completion
+    const targetDate = new Date(goal.targetDate);
+    const daysAhead = Math.max(
+      Math.floor((targetDate - completedAt) / (1000 * 60 * 60 * 24)),
+      0
+    );
+
+    // Next goal: the highest-priority active (< 100%) goal that isn't this one
+    const allGoals = await Goal.find({ userId: req.userId }).sort({ priority: -1 });
+    const nextGoal = allGoals.find(g => {
+      const progress = g.targetAmount > 0 ? g.existingSavings / g.targetAmount : 0;
+      return g._id.toString() !== req.params.id && progress < 1.0;
+    });
+
+    res.json({
+      goalName: goal.name || goal.goalType,
+      targetAmount: goal.targetAmount,
+      achievedAmount: goal.existingSavings,
+      currency: 'USD',
+      daysToReach,
+      daysAhead,
+      completedAt: completedAt.toISOString(),
+      userName: user?.name || 'Champion',
+      nextGoal: nextGoal
+        ? { name: nextGoal.name || nextGoal.goalType, targetAmount: nextGoal.targetAmount }
+        : null,
+    });
+  } catch (err) {
+    console.error('GOAL COMPLETION ERROR:', err);
+    res.status(500).json({ error: err.message || 'Internal server error' });
+  }
+});
+
+// ── POST /api/ai/goal-celebration ────────────────────────────────────────────
+// Generates AI celebration content server-side (keeps API key off device).
+app.post('/api/ai/goal-celebration', authenticate, async (req, res) => {
+  try {
+    const { goalName, targetAmount, daysToReach, daysAhead, userName, currency } = req.body;
+    if (!goalName) return res.status(400).json({ error: 'goalName is required' });
+
+    const prompt = `Generate a financial goal celebration for a user. Return ONLY raw valid JSON with no markdown.
+User: ${userName || 'Champion'}
+Goal: ${goalName}
+Target: ${currency || 'USD'} ${targetAmount || 0}
+Days taken: ${daysToReach || 0}
+Days ahead of schedule: ${daysAhead || 0}
+
+JSON fields (all strings):
+headline          — short, exciting, emoji-first (max 10 words)
+subHeadline       — one encouraging sentence (max 20 words)  
+badgeTitle        — achievement badge name (max 4 words)
+badgeSubtitle     — badge description (max 8 words)
+motivationalQuote — inspiring quote for their next step (max 30 words)`;
+
+    let aiData;
+    try {
+      const { text } = await callAI(prompt, null, true);
+      aiData = extractJson(text);
+      if (!aiData.headline || !aiData.motivationalQuote)
+        throw new Error('Incomplete AI response');
+    } catch (err) {
+      console.error('❌ AI celebration failed, using fallback:', err.message);
+      aiData = {
+        headline: `🎉 You crushed it, ${userName || 'Champion'}!`,
+        subHeadline: `You reached ${goalName} with incredible focus and discipline.`,
+        badgeTitle: 'Goal Crusher',
+        badgeSubtitle: 'Financial Achievement Unlocked',
+        motivationalQuote: 'Every big goal starts with one decision. You made it. Now aim higher.',
+      };
+    }
+
+    res.json({ data: aiData });
+  } catch (err) {
+    console.error('AI CELEBRATION ERROR:', err);
+    res.status(500).json({ error: err.message || 'Internal server error' });
+  }
+});
+
+
 
 
 
