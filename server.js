@@ -5590,6 +5590,43 @@ Return ONLY a JSON object with this exact structure:
 
 
 
+// Simple in‑memory OTP store (replace with DB in production)
+const otpStore = new Map(); // key: email, value: { code, expiresAt }
+
+// Generate a 6‑digit OTP and "send" it (for dev, just return in response)
+app.post('/api/auth/forgot-password', async (req, res) => {
+  const { email } = req.body;
+  if (!email) return res.status(400).json({ error: 'Email is required.' });
+
+  const otp = Math.floor(100000 + Math.random() * 900000).toString();
+  const expiresAt = Date.now() + 10 * 60 * 1000; // 10 minutes
+
+  // In production: send OTP via email
+  otpStore.set(email, { code: otp, expiresAt });
+
+  // For development, return OTP in response (remove in production)
+  res.json({ message: 'OTP sent.', devOtp: otp });
+});
+
+// Verify OTP
+app.post('/api/auth/verify-otp', (req, res) => {
+  const { email, otp } = req.body;
+  if (!email || !otp) return res.status(400).json({ error: 'Email and OTP are required.' });
+
+  const record = otpStore.get(email);
+  if (!record) return res.status(400).json({ error: 'No OTP found for this email.' });
+  if (record.expiresAt < Date.now()) return res.status(400).json({ error: 'OTP expired.' });
+  if (record.code !== otp) return res.status(400).json({ error: 'Invalid OTP.' });
+
+  // OTP valid – delete it and issue a reset token (or mark as verified)
+  otpStore.delete(email);
+  const resetToken = require('crypto').randomBytes(32).toString('hex'); // JWT in real app
+  // Store token with email (in production use DB or JWT)
+  // For simplicity, return token; frontend will use it in reset-password
+  res.json({ message: 'OTP verified.', resetToken });
+});
+
+
 
 
 
