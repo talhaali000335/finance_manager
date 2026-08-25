@@ -5452,7 +5452,7 @@ based on the actual survey answers above. Make them specific and personal, not g
 
 
 // GET /api/goals/:goalId/completion
-const mongoose = require('mongoose');
+
 
 app.get('/api/goal-celebration/:goalId', authenticate, async (req, res) => {
   try {
