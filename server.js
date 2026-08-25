@@ -5452,18 +5452,27 @@ based on the actual survey answers above. Make them specific and personal, not g
 
 
 // GET /api/goals/:goalId/completion
-// ─── GOAL CELEBRATION ENDPOINT ─────────────────────────────────────────────
+const mongoose = require('mongoose');
+
 app.get('/api/goal-celebration/:goalId', authenticate, async (req, res) => {
   try {
     const { goalId } = req.params;
     const userId = req.userId;
 
+    // Convert goalId to ObjectId (important if schema uses ObjectId)
+    let goalObjectId;
+    try {
+      goalObjectId = new mongoose.Types.ObjectId(goalId);
+    } catch (err) {
+      return res.status(400).json({ error: 'Invalid goal ID.' });
+    }
+
     // 1. Fetch the completed goal
-    const completedGoal = await Goal.findOne({ _id: goalId, userId });
+    const completedGoal = await Goal.findOne({ _id: goalObjectId, userId });
     if (!completedGoal) return res.status(404).json({ error: 'Goal not found.' });
 
     // 2. Fetch all other goals (potential next targets)
-    const otherGoals = await Goal.find({ userId, _id: { $ne: goalId } });
+    const otherGoals = await Goal.find({ userId, _id: { $ne: goalObjectId } });
 
     // 3. Determine the most progressed remaining goal
     let nextTarget = null;
@@ -5475,7 +5484,7 @@ app.get('/api/goal-celebration/:goalId', authenticate, async (req, res) => {
       });
     }
 
-    // 4. AI-generated motivational quote and other dynamic content
+    // 4. AI-generated content (optional, with fallbacks)
     let headline = 'Goal Crushed! 🎉';
     let subHeadline = "You're unstoppable.";
     let badgeTitle = 'Achievement Unlocked';
@@ -5502,27 +5511,29 @@ app.get('/api/goal-celebration/:goalId', authenticate, async (req, res) => {
       console.error('AI celebration failed, using defaults:', err.message);
     }
 
-    // 5. Compute days to reach and ahead by (simplified, adjust to your data)
-    const daysToReach = Math.max(
-      1,
-      Math.ceil(
-        (completedGoal.targetAmount - completedGoal.existingSavings) /
-          (completedGoal.existingSavings / Math.max(1, completedGoal.daysTracked || 30))
-      )
-    );
-    const aheadBy = 0; // you can compute based on target date vs actual completion date
+    // 5. Compute days to reach and ahead by (simplified)
+    // Replace with actual logic based on your Goal model fields
+    const daysToReach = Math.max(1, Math.ceil(
+      (completedGoal.targetAmount - completedGoal.existingSavings) /
+      (completedGoal.existingSavings / Math.max(1, completedGoal.daysTracked || 30))
+    ));
+    const aheadBy = 0;
     const daysToReachLabel = `${daysToReach} days`;
     const aheadByFormatted = aheadBy > 0 ? `${aheadBy} days` : 'On time';
 
-    // 6. Next target details
-    const nextTargetName = nextTarget ? nextTarget.name : null;
-    const nextTargetFormatted = nextTarget
-      ? `$${(nextTarget.targetAmount - nextTarget.existingSavings).toFixed(0)} to go`
-      : '';
+    // 6. Next target details – ensure name is non-empty
+    let nextTargetName = null;
+    let nextTargetFormatted = '';
+    if (nextTarget) {
+      nextTargetName = nextTarget.name && nextTarget.name.trim() !== '' 
+        ? nextTarget.name.trim() 
+        : 'Next Goal';
+      nextTargetFormatted = `$${(nextTarget.targetAmount - nextTarget.existingSavings).toFixed(0)} to go`;
+    }
 
     // 7. Respond with all data
     res.json({
-      goalName: completedGoal.name,
+      goalName: completedGoal.name || 'Goal',
       headline,
       subHeadline,
       badgeTitle,
@@ -5538,10 +5549,6 @@ app.get('/api/goal-celebration/:goalId', authenticate, async (req, res) => {
     res.status(500).json({ error: err.message || 'Internal server error' });
   }
 });
-
-
-
-
 
 
 // POST /api/ai/goal-celebration
