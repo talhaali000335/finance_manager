@@ -5452,55 +5452,90 @@ based on the actual survey answers above. Make them specific and personal, not g
 
 
 // GET /api/goals/:goalId/completion
-app.get('/api/goals/:goalId/completion', authenticate, async (req, res) => {
+// ─── GOAL CELEBRATION ENDPOINT ─────────────────────────────────────────────
+app.get('/api/goal-celebration/:goalId', authenticate, async (req, res) => {
   try {
     const { goalId } = req.params;
-    const goal = await Goal.findOne({ _id: goalId, userId: req.userId });
-    if (!goal) return res.status(404).json({ error: 'Goal not found.' });
+    const userId = req.userId;
 
-    const user = await User.findById(req.userId).select('name profilePictureUrl');
+    // 1. Fetch the completed goal
+    const completedGoal = await Goal.findOne({ _id: goalId, userId });
+    if (!completedGoal) return res.status(404).json({ error: 'Goal not found.' });
 
-    // Calculate days taken to reach the goal (from creation to completion)
-    const startDate = new Date(goal.createdAt || Date.now());
-    const endDate = goal.completedAt ? new Date(goal.completedAt) : new Date();
-    const daysToReach = Math.max(1, Math.ceil((endDate - startDate) / (1000 * 60 * 60 * 24)));
+    // 2. Fetch all other goals (potential next targets)
+    const otherGoals = await Goal.find({ userId, _id: { $ne: goalId } });
 
-    // Days ahead: targetDate (original) minus actual completion date
-    let daysAhead = 0;
-    if (goal.targetDate && goal.completedAt) {
-      const target = new Date(goal.targetDate);
-      const actual = new Date(goal.completedAt);
-      daysAhead = Math.max(0, Math.ceil((target - actual) / (1000 * 60 * 60 * 24)));
+    // 3. Determine the most progressed remaining goal
+    let nextTarget = null;
+    if (otherGoals.length > 0) {
+      nextTarget = otherGoals.reduce((best, g) => {
+        const bestRatio = best.existingSavings / best.targetAmount;
+        const currentRatio = g.existingSavings / g.targetAmount;
+        return currentRatio > bestRatio ? g : best;
+      });
     }
 
-    // Find next active goal (not completed and not the current one)
-    const nextGoal = await Goal.findOne({
-      userId: req.userId,
-      _id: { $ne: goalId },
-      completedAt: { $exists: false }, // adjust if you have a status field
-    }).sort({ priority: -1, createdAt: -1 }).limit(1);
+    // 4. AI-generated motivational quote and other dynamic content
+    let headline = 'Goal Crushed! 🎉';
+    let subHeadline = "You're unstoppable.";
+    let badgeTitle = 'Achievement Unlocked';
+    let badgeSubtitle = 'You reached your goal';
+    let motivationalQuote = "Every step forward counts.";
 
+    try {
+      const prompt = `The user just completed their goal "${completedGoal.name}". 
+      Generate a short, inspiring celebration message with:
+      - headline (max 5 words, exciting)
+      - subHeadline (max 8 words, supportive)
+      - badgeTitle (max 3 words)
+      - badgeSubtitle (max 6 words)
+      - motivationalQuote (1 sentence)
+      Return ONLY JSON with these keys.`;
+      const { text } = await callAI(prompt, null, true);
+      const aiData = JSON.parse(text);
+      if (aiData.headline) headline = aiData.headline;
+      if (aiData.subHeadline) subHeadline = aiData.subHeadline;
+      if (aiData.badgeTitle) badgeTitle = aiData.badgeTitle;
+      if (aiData.badgeSubtitle) badgeSubtitle = aiData.badgeSubtitle;
+      if (aiData.motivationalQuote) motivationalQuote = aiData.motivationalQuote;
+    } catch (err) {
+      console.error('AI celebration failed, using defaults:', err.message);
+    }
+
+    // 5. Compute days to reach and ahead by (simplified, adjust to your data)
+    const daysToReach = Math.max(
+      1,
+      Math.ceil(
+        (completedGoal.targetAmount - completedGoal.existingSavings) /
+          (completedGoal.existingSavings / Math.max(1, completedGoal.daysTracked || 30))
+      )
+    );
+    const aheadBy = 0; // you can compute based on target date vs actual completion date
+    const daysToReachLabel = `${daysToReach} days`;
+    const aheadByFormatted = aheadBy > 0 ? `${aheadBy} days` : 'On time';
+
+    // 6. Next target details
+    const nextTargetName = nextTarget ? nextTarget.name : null;
+    const nextTargetFormatted = nextTarget
+      ? `$${(nextTarget.targetAmount - nextTarget.existingSavings).toFixed(0)} to go`
+      : '';
+
+    // 7. Respond with all data
     res.json({
-      data: {
-        _id: goal._id,
-        goalName: goal.name || goal.goalType,
-        targetAmount: goal.targetAmount,
-        achievedAmount: goal.existingSavings || goal.targetAmount,
-        currency: 'USD', // or from profile if stored
-        daysToReach,
-        daysAhead,
-        completedAt: goal.completedAt || new Date(),
-        userName: user?.name || 'Champion',
-        trophyImageUrl: goal.trophyImageUrl || null,
-        nextGoal: nextGoal ? {
-          name: nextGoal.name || nextGoal.goalType,
-          targetAmount: nextGoal.targetAmount
-        } : null
-      }
+      goalName: completedGoal.name,
+      headline,
+      subHeadline,
+      badgeTitle,
+      badgeSubtitle,
+      motivationalQuote,
+      daysToReachLabel,
+      aheadByFormatted,
+      nextTargetName,
+      nextTargetFormatted,
     });
   } catch (err) {
-    console.error('GOAL COMPLETION FETCH ERROR:', err);
-    res.status(500).json({ error: 'Server error.' });
+    console.error('Goal celebration error:', err);
+    res.status(500).json({ error: err.message || 'Internal server error' });
   }
 });
 
