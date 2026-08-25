@@ -5728,35 +5728,41 @@ app.get('/api/yearly-story', authenticate, async (req, res) => {
     const profile = await Profile.findOne({ userId: req.userId });
     if (!profile) return res.status(404).json({ error: 'Profile not found' });
 
-    // Fetch user stats (simplified – adapt to your real data)
-    const goals = await Goal.find({ userId: req.userId });
-    const intents = await Intent.find({ userId: req.userId });
+    // Compute real streak from habits
+    const habits = await Habit.find({ userId: req.userId, active: true });
+    let daysTracked = 0;
+    for (const h of habits) {
+      daysTracked += computeStreak(h.checkIns); // total streak days
+    }
 
-    // Calculate totals
+    // Total saved = income - expenses
     const totalSaved = (profile.primarySalary || 0) + (profile.sideIncome || 0) -
                        ((profile.rent || 0) + (profile.food || 0) +
                         (profile.transport || 0) + (profile.entertainment || 0) +
                         (profile.monthlyEMI || 0));
+
     const savingsRate = profile.primarySalary ? Math.round((totalSaved / profile.primarySalary) * 100) : 0;
-    const daysTracked = intents.length * 3; // just a placeholder; replace with real calculation
+
+    const goals = await Goal.find({ userId: req.userId });
     const goalsHit = goals.filter(g => g.existingSavings >= g.targetAmount).length;
 
-    // AI-generated evolution text
+    const year = new Date().getFullYear(); // dynamic year
+
+    // AI generation (optional)
     let evolutionFrom = 'Uncertain Starter';
     let evolutionTo = 'Intentional Builder';
     let finalQuote = "This year you didn't just save money — you changed your relationship with it. That's the hardest part, and you've already done it.";
-    let landmarkDescription = 'The day you hit $30,000 saved. You were 47 days ahead of schedule.';
     let landmarkDate = 'June 14';
+    let landmarkDescription = 'The day you hit $30,000 saved. You were 47 days ahead of schedule.';
 
     try {
-      const prompt = `Based on the user's financial data: totalSaved=${totalSaved}, savingsRate=${savingsRate}%, goalsHit=${goalsHit}, generate a yearly money story with:
-      - evolutionFrom (short title, e.g., "Uncertain Starter")
-      - evolutionTo (short title, e.g., "Intentional Builder")
-      - finalQuote (inspiring, 1 sentence)
+      const prompt = `Based on user data: totalSaved=${totalSaved}, savingsRate=${savingsRate}%, goalsHit=${goalsHit}, daysTracked=${daysTracked}, generate a yearly money story with:
+      - evolutionFrom (short title)
+      - evolutionTo (short title)
+      - finalQuote (inspiring 1 sentence)
       - landmarkDate (e.g., "June 14")
-      - landmarkDescription (e.g., "The day you hit $30,000 saved. You were 47 days ahead of schedule.")
+      - landmarkDescription (e.g., "The day you hit $30,000 saved.")
       Return ONLY JSON with these keys.`;
-
       const { text } = await callAI(prompt, null, true);
       const aiData = JSON.parse(text);
       if (aiData.evolutionFrom) evolutionFrom = aiData.evolutionFrom;
@@ -5768,8 +5774,10 @@ app.get('/api/yearly-story', authenticate, async (req, res) => {
       console.error('AI yearly story failed, using defaults:', err.message);
     }
 
+    const shareText = `In ${year}, I saved $${totalSaved} (${savingsRate}% savings rate), hit ${goalsHit} goals, and tracked ${daysTracked} days. Check out my Money Story!`;
+
     res.json({
-      year: new Date().getFullYear(),
+      year,
       totalSaved,
       savingsRate,
       daysTracked,
@@ -5784,13 +5792,13 @@ app.get('/api/yearly-story', authenticate, async (req, res) => {
       landmarkDate,
       landmarkDescription,
       finalQuote,
+      shareText,
     });
   } catch (err) {
     console.error('YEARLY STORY ERROR:', err);
     res.status(500).json({ error: err.message || 'Internal server error' });
   }
 });
-
 
 
 
