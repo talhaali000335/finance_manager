@@ -5722,6 +5722,80 @@ Return ONLY a JSON object with this exact structure:
 
 
 
+// ─── Yearly Money Story ─────────────────────────────────────────────────────
+app.get('/api/yearly-story', authenticate, async (req, res) => {
+  try {
+    const profile = await Profile.findOne({ userId: req.userId });
+    if (!profile) return res.status(404).json({ error: 'Profile not found' });
+
+    // Fetch user stats (simplified – adapt to your real data)
+    const goals = await Goal.find({ userId: req.userId });
+    const intents = await Intent.find({ userId: req.userId });
+
+    // Calculate totals
+    const totalSaved = (profile.primarySalary || 0) + (profile.sideIncome || 0) -
+                       ((profile.rent || 0) + (profile.food || 0) +
+                        (profile.transport || 0) + (profile.entertainment || 0) +
+                        (profile.monthlyEMI || 0));
+    const savingsRate = profile.primarySalary ? Math.round((totalSaved / profile.primarySalary) * 100) : 0;
+    const daysTracked = intents.length * 3; // just a placeholder; replace with real calculation
+    const goalsHit = goals.filter(g => g.existingSavings >= g.targetAmount).length;
+
+    // AI-generated evolution text
+    let evolutionFrom = 'Uncertain Starter';
+    let evolutionTo = 'Intentional Builder';
+    let finalQuote = "This year you didn't just save money — you changed your relationship with it. That's the hardest part, and you've already done it.";
+    let landmarkDescription = 'The day you hit $30,000 saved. You were 47 days ahead of schedule.';
+    let landmarkDate = 'June 14';
+
+    try {
+      const prompt = `Based on the user's financial data: totalSaved=${totalSaved}, savingsRate=${savingsRate}%, goalsHit=${goalsHit}, generate a yearly money story with:
+      - evolutionFrom (short title, e.g., "Uncertain Starter")
+      - evolutionTo (short title, e.g., "Intentional Builder")
+      - finalQuote (inspiring, 1 sentence)
+      - landmarkDate (e.g., "June 14")
+      - landmarkDescription (e.g., "The day you hit $30,000 saved. You were 47 days ahead of schedule.")
+      Return ONLY JSON with these keys.`;
+
+      const { text } = await callAI(prompt, null, true);
+      const aiData = JSON.parse(text);
+      if (aiData.evolutionFrom) evolutionFrom = aiData.evolutionFrom;
+      if (aiData.evolutionTo) evolutionTo = aiData.evolutionTo;
+      if (aiData.finalQuote) finalQuote = aiData.finalQuote;
+      if (aiData.landmarkDate) landmarkDate = aiData.landmarkDate;
+      if (aiData.landmarkDescription) landmarkDescription = aiData.landmarkDescription;
+    } catch (err) {
+      console.error('AI yearly story failed, using defaults:', err.message);
+    }
+
+    res.json({
+      year: new Date().getFullYear(),
+      totalSaved,
+      savingsRate,
+      daysTracked,
+      goalsHit,
+      evolutionFrom,
+      evolutionTo,
+      achievements: [
+        { title: 'Emergency Fund', subtitle: 'Complete', icon: 'check_circle', color: '#34d399' },
+        { title: 'Meal Prep', subtitle: 'Master', icon: 'restaurant', color: '#fbbd3f' },
+        { title: '100-Day', subtitle: 'Streak', icon: 'trending_up', color: '#fb923c' },
+      ],
+      landmarkDate,
+      landmarkDescription,
+      finalQuote,
+    });
+  } catch (err) {
+    console.error('YEARLY STORY ERROR:', err);
+    res.status(500).json({ error: err.message || 'Internal server error' });
+  }
+});
+
+
+
+
+
+
 // ══════════════════════════════════════════════════════════════════════════════
 //  HEALTH CHECK & ERROR HANDLING
 // ══════════════════════════════════════════════════════════════════════════════
