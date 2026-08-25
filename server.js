@@ -9,9 +9,18 @@ const multer     = require('multer');
 const path       = require('path');
 const cloudinary = require('cloudinary').v2;
 const admin      = require('firebase-admin');
+const app = express();
+
 const nodemailer = require('nodemailer');
 
-const app = express();
+// Create transporter (use your SMTP credentials)
+const transporter = nodemailer.createTransport({
+  service: 'gmail',               // or 'outlook', 'yahoo', etc.
+  auth: {
+    user: process.env.EMAIL_USER, // your email address
+    pass: process.env.EMAIL_PASS, // app password (not normal password)
+  },
+});
 
 // ── Middleware ─────────────────────────────────────────────────────────────────
 app.use(cors());
@@ -709,6 +718,130 @@ app.put('/api/auth/profile', authenticate, upload.single('profilePhoto'), async 
 });
 
 // ── Password reset ─────────────────────────────────────────────────────────────
+
+
+app.post('/api/auth/forgot-password-new', async (req, res) => {
+  const { email } = req.body;
+  if (!email) return res.status(400).json({ error: 'Email is required.' });
+
+  const otp = Math.floor(1000 + Math.random() * 9000).toString();
+  const expiresAt = Date.now() + 10 * 60 * 1000; // 10 minutes
+
+  // Store OTP in memory (or database)
+  otpStore.set(email, { code: otp, expiresAt });
+
+  // Send OTP via email
+  const mailOptions = {
+    from: process.env.EMAIL_USER,
+    to: email,
+    subject: 'Your Password Reset OTP',
+    html: `
+      <div style="font-family: Arial, sans-serif; padding: 20px;">
+        <h2>Password Reset</h2>
+        <p>Your OTP is:</p>
+        <h1 style="letter-spacing: 8px; color: #D4A430;">${otp}</h1>
+        <p>This code expires in 10 minutes.</p>
+      </div>
+    `,
+  };
+
+  try {
+    await transporter.sendMail(mailOptions);
+    res.json({ message: 'OTP sent to your email.' });
+  } catch (err) {
+    console.error('Email send error:', err);
+    res.status(500).json({ error: 'Failed to send OTP email.' });
+  }
+});
+
+
+
+
+// In-memory OTP store (same as before)
+const otpStore = new Map();
+
+app.post('/api/auth/verify-otp', async (req, res) => {
+  try {
+    const { email, otp } = req.body;
+    if (!email || !otp) return res.status(400).json({ error: 'Email and OTP are required.' });
+
+    const record = otpStore.get(email);
+    if (!record) return res.status(400).json({ error: 'No OTP found. Please request a new one.' });
+    if (record.expiresAt < Date.now()) return res.status(400).json({ error: 'OTP expired. Please request a new one.' });
+    if (record.code !== otp.trim()) return res.status(400).json({ error: 'Invalid OTP.' });
+
+    // OTP is valid – delete it
+    otpStore.delete(email);
+
+    // Find user
+    const user = await User.findOne({ email: email.toLowerCase() });
+    if (!user) return res.status(404).json({ error: 'User not found.' });
+
+    // Generate JWT reset token (same as forgot-password used)
+    const resetToken = jwt.sign(
+      { userId: user._id, purpose: 'password_reset' },
+      JWT_SECRET,
+      { expiresIn: '15m' }
+    );
+
+    res.json({ message: 'OTP verified.', resetToken });
+  } catch (err) {
+    console.error('Verify OTP error:', err);
+    res.status(500).json({ error: 'Server error.' });
+  }
+});
+
+
+
+
+
+app.post('/api/auth/reset-password-new', async (req, res) => {
+  try {
+    const { token, newPassword } = req.body;
+    if (!token || !newPassword)
+      return res.status(400).json({ error: 'Token and new password are required.' });
+    if (newPassword.length < 6)
+      return res.status(400).json({ error: 'Password must be at least 6 characters.' });
+
+    let decoded;
+    try {
+      decoded = jwt.verify(token, JWT_SECRET);
+    } catch (err) {
+      return res.status(401).json({ error: 'Invalid or expired token.' });
+    }
+
+    if (decoded.purpose !== 'password_reset')
+      return res.status(401).json({ error: 'Invalid token purpose.' });
+
+    const user = await User.findById(decoded.userId);
+    if (!user) return res.status(404).json({ error: 'User not found.' });
+
+    user.password = newPassword; // pre-save hook will hash it
+    await user.save();
+
+    console.log(`🔒 Password reset successful for ${user.email}`);
+    res.status(200).json({ message: 'Password has been reset successfully. You can now log in.' });
+  } catch (err) {
+    console.error('Reset password error:', err);
+    res.status(500).json({ error: 'Server error.' });
+  }
+});
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 app.post('/api/auth/forgot-password', async (req, res) => {
   try {
     const { email } = req.body;
@@ -5587,34 +5720,6 @@ Return ONLY a JSON object with this exact structure:
 
 
 
-
-const otpStore = new Map();
-
-app.post('/api/auth/forgot-password', async (req, res) => {
-  const { email } = req.body;
-  if (!email) return res.status(400).json({ error: 'Email is required.' });
-
-  const otp = Math.floor(1000 + Math.random() * 9000).toString();
-  const expiresAt = Date.now() + 10 * 60 * 1000;
-  otpStore.set(email, { code: otp, expiresAt });
-
-  // In development, return OTP
-  res.json({ message: 'OTP sent.', devOtp: otp });
-});
-
-app.post('/api/auth/verify-otp', (req, res) => {
-  const { email, otp } = req.body;
-  if (!email || !otp) return res.status(400).json({ error: 'Email and OTP are required.' });
-
-  const record = otpStore.get(email);
-  if (!record) return res.status(400).json({ error: 'No OTP found.' });
-  if (record.expiresAt < Date.now()) return res.status(400).json({ error: 'OTP expired.' });
-  if (record.code !== otp) return res.status(400).json({ error: 'Invalid OTP.' });
-
-  otpStore.delete(email);
-  const resetToken = require('crypto').randomBytes(32).toString('hex');
-  res.json({ message: 'OTP verified.', resetToken });
-});
 
 
 // ══════════════════════════════════════════════════════════════════════════════
