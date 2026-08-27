@@ -2606,6 +2606,10 @@ Output ONLY: { "title": "projection title", "body": "1-2 sentence projection" }`
   }
 });
 
+
+
+
+
 app.get('/api/home-dashboard', authenticate, async (req, res) => {
   try {
     const profile = await Profile.findOne({ userId: req.userId });
@@ -2654,19 +2658,102 @@ Output ONLY a JSON object:
       aiResponse = { insightTitle: 'Your Financial Snapshot', insightBody: 'Keep up the great work!', insightButtonLabel: 'Read Full Analysis', quoteText: 'Financial freedom is not about how much you make, but how much you keep.', quoteAuthor: 'Robert Kiyosaki' };
     }
 
-    const completedCount = (profile.completedTasks || []).length;
-    const activeDays     = Math.min(completedCount, 7);
-    const streak = { days: ['M','T','W','T','F','S','S'], activeIndices: Array.from({ length: activeDays }, (_, i) => i) };
-
-    const badges = [];
-    if (completedCount >= 1) badges.push({ type: 'shield', color: '#A7F3D0', iconColor: '#059669' });
-    if (completedCount >= 3) badges.push({ type: 'heart',  color: '#FDE68A', iconColor: '#D97706' });
-    if (completedCount >= 5) badges.push({ type: 'globe',  color: '#BFDBFE', iconColor: '#2563EB' });
-    if (badges.length === 0) {
-      badges.push({ type: 'shield', color: '#F3F4F6', iconColor: '#9CA3AF' });
-      badges.push({ type: 'heart',  color: '#F3F4F6', iconColor: '#9CA3AF' });
-      badges.push({ type: 'globe',  color: '#F3F4F6', iconColor: '#9CA3AF' });
+    // ---- Real streak calculation ----
+    const intents = await Intent.find({ userId: req.userId }).select('createdAt');
+    const activityDays = new Set();
+    for (const intent of intents) {
+      const d = new Date(intent.createdAt);
+      const dateStr = d.toISOString().slice(0, 10);
+      activityDays.add(dateStr);
     }
+    const sortedDays = Array.from(activityDays).sort();
+    const today = new Date();
+    const todayStr = today.toISOString().slice(0, 10);
+    const yesterday = new Date(today);
+    yesterday.setDate(today.getDate() - 1);
+    const yesterdayStr = yesterday.toISOString().slice(0, 10);
+
+    let currentStreak = 0;
+    const expectedDay = activityDays.has(todayStr) ? todayStr : yesterdayStr;
+    if (!activityDays.has(expectedDay)) {
+      currentStreak = 0;
+    } else {
+      let idx = sortedDays.indexOf(expectedDay);
+      while (idx >= 0) {
+        const currentDate = new Date(sortedDays[idx] + 'T00:00:00Z');
+        const previousDate = new Date(currentDate);
+        previousDate.setDate(currentDate.getDate() - 1);
+        const previousDateStr = previousDate.toISOString().slice(0, 10);
+
+        if (idx === 0) {
+          currentStreak++;
+          break;
+        }
+        if (sortedDays[idx - 1] === previousDateStr) {
+          currentStreak++;
+          idx--;
+        } else {
+          currentStreak++;
+          break;
+        }
+      }
+    }
+
+    // ---- Badge definitions (same logic as /api/badges) ----
+    const completedSteps = profile.completedSteps || 0;
+    const completedTasks = profile.completedTasks || [];
+    const totalTasks = completedTasks.length;
+
+    const allBadges = [
+      { id: 'first_goal',    earned: goals.length > 0,          type: 'shield', color: '#A7F3D0', iconColor: '#059669' },
+      { id: 'saver_starter', earned: false,                     type: 'heart',  color: '#FDE68A', iconColor: '#D97706' },
+      { id: 'budget_master', earned: completedSteps >= 3,       type: 'globe',  color: '#BFDBFE', iconColor: '#2563EB' },
+      { id: 'goal_crusher',  earned: false,                     type: 'shield', color: '#FBCFE8', iconColor: '#DB2777' },
+      { id: 'streak_7',      earned: currentStreak >= 7,        type: 'heart',  color: '#FEE2E2', iconColor: '#DC2626' },
+      { id: 'frugal_hero',   earned: false,                     type: 'globe',  color: '#D1FAE5', iconColor: '#059669' },
+    ];
+
+    if (income > 0) {
+      const savingsRate = (profile.cashSavings || 0) / income;
+      const saverBadge = allBadges.find(b => b.id === 'saver_starter');
+      saverBadge.earned = savingsRate >= 0.1;
+
+      const entRate = (profile.entertainment || 0) / income;
+      const frugalBadge = allBadges.find(b => b.id === 'frugal_hero');
+      frugalBadge.earned = entRate < 0.05;
+    }
+
+    goals.forEach(goal => {
+      if (goal.targetAmount > 0) {
+        const progress = (goal.existingSavings || 0) / goal.targetAmount;
+        if (progress >= 0.8) {
+          const badge = allBadges.find(b => b.id === 'goal_crusher');
+          badge.earned = true;
+        }
+      }
+    });
+
+    // Build the badges array (only earned, max 3, preserving colors)
+    const badges = allBadges
+      .filter(b => b.earned)
+      .slice(0, 3)
+      .map(b => ({ type: b.type, color: b.color, iconColor: b.iconColor }));
+
+    // Fallback grey placeholders if none earned
+    if (badges.length === 0) {
+      badges.push(
+        { type: 'shield', color: '#F3F4F6', iconColor: '#9CA3AF' },
+        { type: 'heart',  color: '#F3F4F6', iconColor: '#9CA3AF' },
+        { type: 'globe',  color: '#F3F4F6', iconColor: '#9CA3AF' }
+      );
+    }
+
+    // ---- Streak display ----
+    const activeDays = Math.min(currentStreak, 7);
+    const streak = {
+      days: ['M','T','W','T','F','S','S'],
+      activeIndices: Array.from({ length: activeDays }, (_, i) => i),
+    };
 
     const baseImgUrl = 'https://lh3.googleusercontent.com/aida-public/';
     const actions = [
@@ -2675,12 +2762,36 @@ Output ONLY a JSON object:
       { imageUrl: baseImgUrl + 'AB6AXuAPxr6CwtWymbHkUpDEK-S_OIXWxkK6XlGm1e15tKLzDDiUUHrYB_txGLiM1mkRlMIkiY6MIkZ2NBjkH6B5G05CouS11mF9oHIZDD3rbWsO8r-Gnr14ONQNpZd7X5HVP5ThK9dtOK0zC7pFWQNNqDPg8hBIRbHXmXdXcJ5RdGdQQD1ShfLKoPzZj1J4UQp9P9W5Hot8iXAqvx9VWvASbLPRiylGAAvt98yYJ2stsvR7BaMlBYDThcyN', label: 'Insights' },
     ];
 
-    res.json({ greeting, profileImageUrl: profilePic, goalProgress, goalTitle, goalAmount, insightTitle: aiResponse.insightTitle, insightBody: aiResponse.insightBody, insightButtonLabel: aiResponse.insightButtonLabel, quoteText: aiResponse.quoteText, quoteAuthor: aiResponse.quoteAuthor, streak, badges, actions });
+    res.json({
+      greeting,
+      profileImageUrl: profilePic,
+      goalProgress,
+      goalTitle,
+      goalAmount,
+      insightTitle: aiResponse.insightTitle,
+      insightBody: aiResponse.insightBody,
+      insightButtonLabel: aiResponse.insightButtonLabel,
+      quoteText: aiResponse.quoteText,
+      quoteAuthor: aiResponse.quoteAuthor,
+      streak,
+      badges,
+      actions,
+    });
   } catch (err) {
     console.error('HOME DASHBOARD ERROR:', err);
     res.status(500).json({ error: err.message || 'Internal server error' });
   }
 });
+
+
+
+
+
+
+
+
+
+
 
 app.get('/api/net-worth', authenticate, async (req, res) => {
   try {
