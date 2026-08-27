@@ -689,62 +689,71 @@ app.get('/api/auth/me', authenticate, async (req, res) => {
 });
 
 
-// ── Update profile (with photo upload) ────────────────────────────────────────
+// ── Update google login ────────────────────────────────────────
 
 
 const { OAuth2Client } = require('google-auth-library');
-const client = new OAuth2Client(process.env.GOOGLE_CLIENT_ID); // your web client ID
+const client = new OAuth2Client(
+  process.env.GOOGLE_CLIENT_ID,
+  process.env.GOOGLE_CLIENT_SECRET  // ← you need this now
+);
 
 app.post('/api/auth/google', async (req, res) => {
   try {
-    const { token } = req.body;
-    if (!token) return res.status(400).json({ error: 'Token is required' });
+    const { serverAuthCode } = req.body;
+    if (!serverAuthCode) return res.status(400).json({ error: 'serverAuthCode is required' });
 
-    // Verify Google token
-    const ticket = await client.verifyIdToken({
-      idToken: token,
-      audience: process.env.GOOGLE_CLIENT_ID,  // your client ID
+    // Exchange the auth code for tokens
+    const { tokens } = await client.getToken({
+      code: serverAuthCode,
+      // redirect_uri may be required as '' or 'postmessage' depending on client type
     });
+
+    if (!tokens.id_token) {
+      return res.status(401).json({ error: 'No id_token returned from Google' });
+    }
+
+    const ticket = await client.verifyIdToken({
+      idToken: tokens.id_token,
+      audience: process.env.GOOGLE_CLIENT_ID,
+    });
+
     const payload = ticket.getPayload();
     const email = payload.email;
     const name = payload.name;
     const googleId = payload.sub;
     const profilePictureUrl = payload.picture || '';
 
-    // Find or create user
     let user = await User.findOne({ email });
     if (!user) {
-      user = new User({
-        name: name || 'Google User',
-        email,
-        password: '', // no password for Google sign-in
-        profilePictureUrl,
-        googleId,
-      });
+      user = new User({ name: name || 'Google User', email, password: '', profilePictureUrl, googleId });
       await user.save();
-    } else {
-      // Optionally update googleId if not present
-      if (!user.googleId) {
-        user.googleId = googleId;
-        await user.save();
-      }
+    } else if (!user.googleId) {
+      user.googleId = googleId;
+      await user.save();
     }
 
     const jwtToken = generateToken(user._id);
     res.json({
       token: jwtToken,
-      user: {
-        id: user._id,
-        name: user.name,
-        email: user.email,
-        profilePictureUrl: user.profilePictureUrl,
-      },
+      user: { id: user._id, name: user.name, email: user.email, profilePictureUrl: user.profilePictureUrl },
     });
   } catch (err) {
     console.error('GOOGLE AUTH ERROR:', err);
-    res.status(401).json({ error: 'Invalid Google token' });
+    res.status(401).json({ error: 'Invalid Google auth code' });
   }
 });
+
+
+
+
+
+
+
+
+
+
+
 
 // ── Update profile (with photo upload) ────────────────────────────────────────
 app.put('/api/auth/profile', authenticate, upload.single('profilePhoto'), async (req, res) => {
