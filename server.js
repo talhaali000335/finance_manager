@@ -1952,6 +1952,16 @@ USER DATA:
   }
 });
 
+
+
+
+
+
+
+
+
+
+
 app.get('/api/action-plan', authenticate, async (req, res) => {
   try {
     const profile = await Profile.findOne({ userId: req.userId });
@@ -1991,6 +2001,15 @@ app.get('/api/action-plan', authenticate, async (req, res) => {
   }
 });
 
+
+
+
+
+
+
+
+
+
 app.post('/api/action-plan/task-done', authenticate, async (req, res) => {
   try {
     const { taskTitle } = req.body;
@@ -2001,6 +2020,21 @@ app.post('/api/action-plan/task-done', authenticate, async (req, res) => {
     res.status(500).json({ error: err.message });
   }
 });
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 app.get('/api/tax-analysis', authenticate, async (req, res) => {
   try {
@@ -2049,6 +2083,17 @@ Return ONLY the JSON, no additional text.`.trim();
   }
 });
 
+
+
+
+
+
+
+
+
+
+
+
 app.get('/api/cash-flow', authenticate, async (req, res) => {
   try {
     let profile = await Profile.findOne({ userId: req.userId });
@@ -2093,14 +2138,47 @@ app.get('/api/cash-flow', authenticate, async (req, res) => {
   }
 });
 
+
+
+
+
+
+
+
+
+
+
+
+
+// Helper to get ISO week key (e.g., "2026-W35")
+function getIsoWeekKey(date) {
+  const d = new Date(Date.UTC(date.getFullYear(), date.getMonth(), date.getDate()));
+  const dayNum = d.getUTCDay() || 7;
+  d.setUTCDate(d.getUTCDate() + 4 - dayNum);
+  const yearStart = new Date(Date.UTC(d.getUTCFullYear(), 0, 1));
+  const weekNo = Math.ceil((((d - yearStart) / 86400000) + 1) / 7);
+  return `${d.getUTCFullYear()}-W${weekNo.toString().padStart(2, '0')}`;
+}
+
+
+
+
+
+
+
+
+
+// Endpoint
 app.get('/api/insight/today', authenticate, async (req, res) => {
   try {
+    // 1. Fetch user profile and goals
     const profile = await Profile.findOne({ userId: req.userId });
-    const goals   = await Goal.find({ userId: req.userId });
+    const goals = await Goal.find({ userId: req.userId });
 
-    const monthlyIncome   = (profile?.primarySalary || 0) + (profile?.sideIncome || 0);
+    const monthlyIncome = (profile?.primarySalary || 0) + (profile?.sideIncome || 0);
     const monthlyExpenses = (profile?.rent || 0) + (profile?.food || 0) + (profile?.transport || 0) + (profile?.entertainment || 0) + (profile?.monthlyEMI || 0);
 
+    // 2. Upsert current week snapshot
     const now = new Date();
     const currentWeekKey = getIsoWeekKey(now);
     await WeeklySnapshot.findOneAndUpdate(
@@ -2109,18 +2187,49 @@ app.get('/api/insight/today', authenticate, async (req, res) => {
       { upsert: true, new: true }
     );
 
-    const weeklySnapshots = await WeeklySnapshot.find({ userId: req.userId }).sort({ weekKey: -1 }).limit(6);
-    const orderedWeeks    = weeklySnapshots.reverse();
-    const chartPoints     = orderedWeeks.map(w => w.expenses);
+    // 3. Get last 6 weekly snapshots for chart
+    const weeklySnapshots = await WeeklySnapshot.find({ userId: req.userId })
+      .sort({ weekKey: -1 })
+      .limit(6);
+    const orderedWeeks = weeklySnapshots.reverse();
+    const chartPoints = orderedWeeks.map(w => w.expenses);
 
+    // 4. Calculate trend direction
     let trendDirection = 'flat';
     if (chartPoints.length >= 2) {
       if (chartPoints[chartPoints.length - 1] > chartPoints[0]) trendDirection = 'up';
       else if (chartPoints[chartPoints.length - 1] < chartPoints[0]) trendDirection = 'down';
     }
 
+    // 5. Calculate streak (consecutive weeks with snapshots, including current week)
+    const allSnapshots = await WeeklySnapshot.find({ userId: req.userId })
+      .sort({ weekKey: -1 })
+      .lean();
+
+    let streak = 0;
+    let cursorWeek = currentWeekKey;
+    for (const snap of allSnapshots) {
+      if (snap.weekKey === cursorWeek) {
+        streak++;
+        // Move to previous week
+        const [year, week] = cursorWeek.split('-W').map(Number);
+        const date = new Date(year, 0, 1 + (week - 1) * 7);
+        date.setDate(date.getDate() - 7);
+        cursorWeek = getIsoWeekKey(date);
+      } else {
+        break;
+      }
+    }
+
+    // 6. Format today's date string
+    const days = ['Sunday','Monday','Tuesday','Wednesday','Thursday','Friday','Saturday'];
+    const months = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+    const dateStr = `${days[now.getDay()]}, ${months[now.getMonth()]} ${now.getDate()}`;
+
+    // 7. Determine primary goal
     const primaryGoal = goals.sort((a, b) => (b.priority || 0) - (a.priority || 0))[0];
 
+    // 8. Build AI prompt
     const prompt = `You are a friendly personal finance coach. Based on the real data below, write today's insight for the user.
 Never invent numbers — only reference the ones given.
 
@@ -2138,22 +2247,42 @@ Output must be ONLY valid JSON with these exact keys, no other text:
   "action": { "title": "short action card title", "description": "1-2 sentence actionable suggestion", "buttonLabel": "short button text" }
 }`.trim();
 
+    // 9. Call AI and parse response
     let parsed;
     try {
       const { text } = await callAI(prompt, null, true);
-      parsed = extractJson(text);
+      parsed = extractJson(text); // assume you have a function to extract JSON from text
       if (!parsed.title || !parsed.body) throw new Error('Incomplete data from AI provider');
     } catch (err) {
       console.error("❌ All AI providers failed for today's insight:", err.message);
       return res.status(502).json({ error: err.message || 'Unable to generate insight. Please try again later.' });
     }
 
-    res.json({ title: parsed.title, body: parsed.body, chartPoints: chartPoints.length ? chartPoints : null, trendDirection, action: parsed.action || null });
+    // 10. Send response with date and streak
+    res.json({
+      title: parsed.title,
+      body: parsed.body,
+      chartPoints: chartPoints.length ? chartPoints : null,
+      trendDirection,
+      action: parsed.action || null,
+      date: dateStr,
+      streak
+    });
+
   } catch (err) {
     console.error('TODAY INSIGHT ERROR:', err);
     res.status(500).json({ error: err.message || 'Internal server error' });
   }
 });
+
+
+
+
+
+
+
+
+
 
 app.post('/api/chat', authenticate, async (req, res) => {
   try {
