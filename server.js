@@ -6127,12 +6127,11 @@ app.get('/api/yearly-story', authenticate, async (req, res) => {
     const profile = await Profile.findOne({ userId: req.userId });
     if (!profile) return res.status(404).json({ error: 'Profile not found' });
 
+    // ---- Real data ----
+    const goals = await Goal.find({ userId: req.userId });
     const habits = await Habit.find({ userId: req.userId, active: true });
-    let daysTracked = 0;
-    for (const h of habits) {
-      daysTracked += computeStreak(h.checkIns);
-    }
 
+    // Total saved = income - expenses (same as before)
     const totalSaved = (profile.primarySalary || 0) + (profile.sideIncome || 0) -
                        ((profile.rent || 0) + (profile.food || 0) +
                         (profile.transport || 0) + (profile.entertainment || 0) +
@@ -6140,47 +6139,143 @@ app.get('/api/yearly-story', authenticate, async (req, res) => {
 
     const savingsRate = profile.primarySalary ? Math.round((totalSaved / profile.primarySalary) * 100) : 0;
 
-    const goals = await Goal.find({ userId: req.userId });
-    const goalsHit = goals.filter(g => g.existingSavings >= g.targetAmount).length;
+    // Days tracked from habit check-ins
+    let daysTracked = 0;
+    for (const h of habits) {
+      daysTracked += computeStreak(h.checkIns);
+    }
 
-    // Set year to next year to align with "Start 2027 Strong"
-    const year = new Date().getFullYear() + 1;
+    // Goals achieved
+    const achievedGoals = goals.filter(g => g.existingSavings >= g.targetAmount);
+    const goalsHit = achievedGoals.length;
 
+    // Current year (or next year depending on UX; use current year for story)
+    const year = new Date().getFullYear();
+
+    // ---- Dynamic Achievements ----
+    const achievements = [];
+
+    // If any goal achieved, show first achieved goal or "Goal Crusher"
+    if (goalsHit > 0) {
+      const firstAchieved = achievedGoals[0];
+      achievements.push({
+        title: firstAchieved.name || 'Goal Achieved',
+        subtitle: 'Complete',
+        icon: 'check_circle',
+        color: '#34d399',
+      });
+    } else {
+      // If no goals achieved, maybe show "First Steps"
+      if (goals.length > 0) {
+        achievements.push({
+          title: 'First Goal',
+          subtitle: 'In Progress',
+          icon: 'flag',
+          color: '#60a5fa',
+        });
+      }
+    }
+
+    // Streak achievement
+    if (daysTracked >= 100) {
+      achievements.push({
+        title: '100-Day',
+        subtitle: 'Streak',
+        icon: 'trending_up',
+        color: '#fb923c',
+      });
+    } else if (daysTracked >= 7) {
+      achievements.push({
+        title: 'Consistent',
+        subtitle: '${daysTracked} Days',
+        icon: 'trending_up',
+        color: '#fbbd3f',
+      });
+    } else {
+      achievements.push({
+        title: 'Getting Started',
+        subtitle: 'Day $daysTracked',
+        icon: 'trending_up',
+        color: '#94a3b8',
+      });
+    }
+
+    // Savings achievement
+    if (savingsRate >= 20) {
+      achievements.push({
+        title: 'Super Saver',
+        subtitle: '${savingsRate}%',
+        icon: 'savings',
+        color: '#34d399',
+      });
+    } else if (savingsRate > 0) {
+      achievements.push({
+        title: 'Saver',
+        subtitle: '${savingsRate}%',
+        icon: 'savings',
+        color: '#60a5fa',
+      });
+    } else {
+      achievements.push({
+        title: 'Start Saving',
+        subtitle: '0%',
+        icon: 'savings',
+        color: '#94a3b8',
+      });
+    }
+
+    // Keep only first 3 achievements (as UI expects)
+    const finalAchievements = achievements.slice(0, 3);
+
+    // ---- Landmark (real, not hardcoded) ----
+    // Find the earliest achieved goal date if any
+    let landmarkDate = null;
+    let landmarkDescription = 'No landmark yet. Keep going!';
+    if (achievedGoals.length > 0) {
+      const earliest = achievedGoals.reduce((min, g) => {
+        const d = g.updatedAt || g.createdAt;
+        return d < min.d ? g : min;
+      }, achievedGoals[0]);
+      const d = new Date(earliest.updatedAt || earliest.createdAt);
+      landmarkDate = d.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
+      landmarkDescription = `The day you achieved "${earliest.name || earliest.goalType}".`;
+    } else if (goals.length > 0) {
+      // If no achievements but goals exist, use the most recent goal creation
+      const latestGoal = goals[goals.length - 1];
+      const d = new Date(latestGoal.createdAt);
+      landmarkDate = d.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
+      landmarkDescription = `Started your journey with "${latestGoal.name || latestGoal.goalType}".`;
+    } else {
+      landmarkDate = '—';
+      landmarkDescription = 'No goals yet. Start your first goal today!';
+    }
+
+    // ---- AI Text Generation ----
     let evolutionFrom = 'Uncertain Starter';
     let evolutionTo = 'Intentional Builder';
-    let finalQuote = "This year you didn't just save money — you changed your relationship with it. That's the hardest part, and you've already done it.";
-    let landmarkDate = 'June 14';
-    let landmarkDescription = 'The day you hit $30,000 saved. You were 47 days ahead of schedule.';
+    let finalQuote = "This year you didn't just save money — you changed your relationship with it.";
 
     try {
-      const prompt = `Based on user data: totalSaved=${totalSaved}, savingsRate=${savingsRate}%, goalsHit=${goalsHit}, daysTracked=${daysTracked}, generate a yearly money story with:
-      - evolutionFrom (short title)
-      - evolutionTo (short title)
-      - finalQuote (inspiring 1 sentence)
-      - landmarkDate (e.g., "June 14")
-      - landmarkDescription (e.g., "The day you hit $30,000 saved.")
-      Return ONLY JSON with these keys.`;
+      const prompt = `Based on real user data:
+- totalSaved = ${totalSaved}
+- savingsRate = ${savingsRate}%
+- goalsHit = ${goalsHit}
+- daysTracked = ${daysTracked}
+- achievements = ${JSON.stringify(finalAchievements)}
+
+Generate a short yearly money story with:
+- evolutionFrom (short title)
+- evolutionTo (short title)
+- finalQuote (inspiring 1 sentence)
+
+Return ONLY JSON with these keys.`;
       const { text } = await callAI(prompt, null, true);
       const aiData = JSON.parse(text);
       if (aiData.evolutionFrom) evolutionFrom = aiData.evolutionFrom;
       if (aiData.evolutionTo) evolutionTo = aiData.evolutionTo;
       if (aiData.finalQuote) finalQuote = aiData.finalQuote;
-      if (aiData.landmarkDate) landmarkDate = aiData.landmarkDate;
-      if (aiData.landmarkDescription) landmarkDescription = aiData.landmarkDescription;
     } catch (err) {
       console.error('AI yearly story failed, using defaults:', err.message);
-    }
-
-    // Dynamic achievements based on real daysTracked
-    const achievements = [
-      { title: 'Emergency Fund', subtitle: 'Complete', icon: 'check_circle', color: '#34d399' },
-      { title: 'Meal Prep', subtitle: 'Master', icon: 'restaurant', color: '#fbbd3f' },
-    ];
-
-    if (daysTracked >= 100) {
-      achievements.push({ title: '100-Day', subtitle: 'Streak', icon: 'trending_up', color: '#fb923c' });
-    } else {
-      achievements.push({ title: 'Early Days', subtitle: 'Just Started', icon: 'trending_up', color: '#fb923c' });
     }
 
     const shareText = `In ${year}, I saved $${totalSaved} (${savingsRate}% savings rate), hit ${goalsHit} goals, and tracked ${daysTracked} days. Check out my Money Story!`;
@@ -6193,7 +6288,7 @@ app.get('/api/yearly-story', authenticate, async (req, res) => {
       goalsHit,
       evolutionFrom,
       evolutionTo,
-      achievements,
+      achievements: finalAchievements,
       landmarkDate,
       landmarkDescription,
       finalQuote,
@@ -6204,8 +6299,6 @@ app.get('/api/yearly-story', authenticate, async (req, res) => {
     res.status(500).json({ error: err.message || 'Internal server error' });
   }
 });
-
-
 
 
 // ══════════════════════════════════════════════════════════════════════════════
