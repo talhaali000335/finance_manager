@@ -4314,67 +4314,149 @@ Output ONLY a JSON object with this exact structure:
   }
 });
 
+
+
+
+
+
+
+
+
+
+
+
+
 app.get('/api/badges', authenticate, async (req, res) => {
   try {
     const profile = await Profile.findOne({ userId: req.userId });
-    const goals   = await Goal.find({ userId: req.userId });
     if (!profile) return res.status(404).json({ error: 'Profile not found' });
+    const goals = await Goal.find({ userId: req.userId });
 
     // ---- Compute XP & Level ----
-    const completed = profile.completedSteps || 0;
-    const totalTasks = profile.completedTasks?.length || 0;
-    const xp = completed * 50 + totalTasks * 10;
+    const completedSteps = profile.completedSteps || 0;
+    const completedTasks = profile.completedTasks || [];
+    const totalTasks = completedTasks.length;
+    const xp = completedSteps * 50 + totalTasks * 10;
     const level = Math.floor(xp / 500) + 1;
     const xpForNextLevel = level * 500;
     const xpProgress = Math.min(xp / xpForNextLevel, 1);
 
-    // ---- Compute streaks ----
-    const firstDay = profile.createdAt || new Date();
-    const now = new Date();
-    const diffDays = Math.floor((now - firstDay) / (1000 * 60 * 60 * 24));
-    const currentStreak = Math.min(diffDays, 7);
-    const longestStreak = currentStreak;
+    // ---- Real Streak Calculation from Spending Activity ----
+    // Fetch all spending intents for the user
+    const intents = await Intent.find({ userId: req.userId }).select('createdAt');
+    // Build set of unique local date strings (YYYY-MM-DD)
+    const activityDays = new Set();
+    for (const intent of intents) {
+      const d = new Date(intent.createdAt);
+      // Use local date (or UTC; adjust if needed)
+      const dateStr = d.toISOString().slice(0, 10);
+      activityDays.add(dateStr);
+    }
+    const sortedDays = Array.from(activityDays).sort();
 
-    // ---- Badge definitions (JS objects, icon names as strings) ----
+    // Compute current streak (consecutive days ending today or yesterday)
+    const today = new Date();
+    const todayStr = today.toISOString().slice(0, 10);
+    const yesterday = new Date(today);
+    yesterday.setDate(today.getDate() - 1);
+    const yesterdayStr = yesterday.toISOString().slice(0, 10);
+
+    let currentStreak = 0;
+    let expectedDay = activityDays.has(todayStr) ? todayStr : yesterdayStr;
+    // If neither today nor yesterday had activity, streak is 0
+    if (!activityDays.has(expectedDay)) {
+      currentStreak = 0;
+    } else {
+      let idx = sortedDays.indexOf(expectedDay);
+      while (idx >= 0) {
+        const currentDate = new Date(sortedDays[idx] + 'T00:00:00Z');
+        const previousDate = new Date(currentDate);
+        previousDate.setDate(currentDate.getDate() - 1);
+        const previousDateStr = previousDate.toISOString().slice(0, 10);
+
+        if (idx === 0) {
+          currentStreak++;
+          break;
+        }
+        if (sortedDays[idx - 1] === previousDateStr) {
+          currentStreak++;
+          idx--;
+        } else {
+          currentStreak++;
+          break;
+        }
+      }
+    }
+
+    // Compute longest streak
+    let longestStreak = 0;
+    let tempStreak = 1;
+    for (let i = 1; i <= sortedDays.length; i++) {
+      if (i < sortedDays.length) {
+        const prevDate = new Date(sortedDays[i - 1] + 'T00:00:00Z');
+        const nextDate = new Date(sortedDays[i] + 'T00:00:00Z');
+        const diffDays = Math.round((nextDate - prevDate) / (1000 * 60 * 60 * 24));
+        if (diffDays === 1) {
+          tempStreak++;
+        } else {
+          longestStreak = Math.max(longestStreak, tempStreak);
+          tempStreak = 1;
+        }
+      } else {
+        longestStreak = Math.max(longestStreak, tempStreak);
+      }
+    }
+    if (sortedDays.length === 1) longestStreak = 1;
+
+    // ---- Badge Definitions ----
     const allBadges = [
-      { id: 'first_goal',    title: 'First Goal',        desc: 'Set your first financial goal',        icon: 'flag' },
-      { id: 'saver_starter', title: 'Saver Starter',      desc: 'Save $500 in your first month',        icon: 'savings' },
-      { id: 'budget_master', title: 'Budget Master',      desc: 'Stay under budget for 3 months',       icon: 'account_balance_wallet' },
-      { id: 'goal_crusher',  title: 'Goal Crusher',       desc: 'Achieve 80% of a goal target',         icon: 'emoji_events' },
-      { id: 'streak_7',      title: '7 Day Streak',       desc: 'Log spending for 7 days in a row',     icon: 'local_fire_department' },
-      { id: 'frugal_hero',   title: 'Frugal Hero',        desc: 'Reduce discretionary spending by 20%', icon: 'eco' },
+      { id: 'first_goal',    title: 'First Goal',        desc: 'Set your first financial goal',        icon: 'flag',                 earned: goals.length > 0 },
+      { id: 'saver_starter', title: 'Saver Starter',     desc: 'Save at least 10% of income',          icon: 'savings',              earned: false },
+      { id: 'budget_master', title: 'Budget Master',     desc: 'Stay under budget for 3 months',       icon: 'account_balance_wallet', earned: completedSteps >= 3 },
+      { id: 'goal_crusher',  title: 'Goal Crusher',      desc: 'Achieve 80% of a goal target',         icon: 'emoji_events',          earned: false },
+      { id: 'streak_7',      title: '7 Day Streak',      desc: 'Log spending for 7 days in a row',     icon: 'local_fire_department', earned: currentStreak >= 7 },
+      { id: 'frugal_hero',   title: 'Frugal Hero',       desc: 'Spend less than 5% on entertainment', icon: 'eco',                  earned: false },
     ];
 
-    // ---- Determine earned badges ----
-    const earned = new Set();
-    if (goals.length > 0) earned.add('first_goal');
-    const savingsRate = profile.primarySalary ? ((profile.cashSavings || 0) / profile.primarySalary) : 0;
-    if (savingsRate >= 0.1) earned.add('saver_starter');
-    if (profile.completedSteps >= 3) earned.add('budget_master');
-    const primaryGoal = goals.sort((a, b) => (b.priority || 0) - (a.priority || 0))[0];
-    if (primaryGoal && primaryGoal.targetAmount > 0) {
-      const progress = (primaryGoal.existingSavings || 0) / primaryGoal.targetAmount;
-      if (progress >= 0.8) earned.add('goal_crusher');
-    }
-    if (totalTasks >= 7) earned.add('streak_7');
-    const ent = profile.entertainment || 0;
+    // ---- Additional Conditions ----
     const income = (profile.primarySalary || 0) + (profile.sideIncome || 0);
-    if (income > 0 && (ent / income) < 0.05) earned.add('frugal_hero');
+    if (income > 0) {
+      const savingsRate = (profile.cashSavings || 0) / income;
+      const saverBadge = allBadges.find(b => b.id === 'saver_starter');
+      saverBadge.earned = savingsRate >= 0.1;
+
+      const entRate = (profile.entertainment || 0) / income;
+      const frugalBadge = allBadges.find(b => b.id === 'frugal_hero');
+      frugalBadge.earned = entRate < 0.05;
+    }
+
+    // Goal Crusher: any goal with progress >= 80%
+    goals.forEach(goal => {
+      if (goal.targetAmount > 0) {
+        const progress = (goal.existingSavings || 0) / goal.targetAmount;
+        if (progress >= 0.8) {
+          const badge = allBadges.find(b => b.id === 'goal_crusher');
+          badge.earned = true;
+        }
+      }
+    });
 
     const badges = allBadges.map(b => ({
       title: b.title,
       desc: b.desc,
       icon: b.icon,
-      locked: !earned.has(b.id),
+      locked: !b.earned,
     }));
 
-    // ---- AI achievement banner ----
+    const earnedCount = allBadges.filter(b => b.earned).length;
+
+    // ---- AI Achievement Banner ----
     const prompt = `
 You are a motivating financial coach. Write a short achievement banner for a user's badge collection.
 Real data:
 - Level: ${level}
 - XP: ${xp} (progress ${Math.round(xpProgress * 100)}%)
-- Earned badges: ${earned.size} / ${allBadges.length}
+- Earned badges: ${earnedCount} / ${allBadges.length}
 - Current streak: ${currentStreak} days
 
 Output ONLY a JSON object:
@@ -4400,7 +4482,7 @@ Output ONLY a JSON object:
       levelTitle: `Level ${level}`,
       xpText: `${xp} XP`,
       xpProgress,
-      earnedCount: earned.size,
+      earnedCount,
       currentStreak,
       longestStreak,
       achievementTitle: ai.achievementTitle,
@@ -4415,6 +4497,9 @@ Output ONLY a JSON object:
     res.status(500).json({ error: err.message || 'Internal server error' });
   }
 });
+
+
+
 
 app.get('/api/subscriptions', authenticate, async (req, res) => {
   try {
