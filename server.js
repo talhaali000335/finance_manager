@@ -167,6 +167,7 @@ const userSchema = new mongoose.Schema({
   profilePictureUrl: { type: String, default: null }, // ✅ Cloudinary URL
   profilePicturePublicId: { type: String, default: null },
   fcmToken: { type: String, default: null }, // ✅ push notifications
+  googleId: { type: String, default: null },
 }, { timestamps: true });
 
 userSchema.pre('save', async function () {
@@ -684,6 +685,64 @@ app.get('/api/auth/me', authenticate, async (req, res) => {
     res.json(user);
   } catch (err) {
     res.status(500).json({ error: 'Server error.' });
+  }
+});
+
+
+// ── Update profile (with photo upload) ────────────────────────────────────────
+
+
+const { OAuth2Client } = require('google-auth-library');
+const client = new OAuth2Client(process.env.GOOGLE_CLIENT_ID); // your web client ID
+
+app.post('/api/auth/google', async (req, res) => {
+  try {
+    const { token } = req.body;
+    if (!token) return res.status(400).json({ error: 'Token is required' });
+
+    // Verify Google token
+    const ticket = await client.verifyIdToken({
+      idToken: token,
+      audience: process.env.GOOGLE_CLIENT_ID,  // your client ID
+    });
+    const payload = ticket.getPayload();
+    const email = payload.email;
+    const name = payload.name;
+    const googleId = payload.sub;
+    const profilePictureUrl = payload.picture || '';
+
+    // Find or create user
+    let user = await User.findOne({ email });
+    if (!user) {
+      user = new User({
+        name: name || 'Google User',
+        email,
+        password: '', // no password for Google sign-in
+        profilePictureUrl,
+        googleId,
+      });
+      await user.save();
+    } else {
+      // Optionally update googleId if not present
+      if (!user.googleId) {
+        user.googleId = googleId;
+        await user.save();
+      }
+    }
+
+    const jwtToken = generateToken(user._id);
+    res.json({
+      token: jwtToken,
+      user: {
+        id: user._id,
+        name: user.name,
+        email: user.email,
+        profilePictureUrl: user.profilePictureUrl,
+      },
+    });
+  } catch (err) {
+    console.error('GOOGLE AUTH ERROR:', err);
+    res.status(401).json({ error: 'Invalid Google token' });
   }
 });
 
