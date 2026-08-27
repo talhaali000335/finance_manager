@@ -3564,23 +3564,33 @@ app.get('/api/your-future', authenticate, async (req, res) => {
 
     const now = new Date();
     const income = (profile.primarySalary || 0) + (profile.sideIncome || 0);
+    const expenses = (profile.rent || 0) + (profile.food || 0) + (profile.transport || 0) + (profile.entertainment || 0) + (profile.monthlyEMI || 0);
+    const monthlySurplus = Math.max(income - expenses, 0);
 
-    // Map goal data for AI
+    // Compute predicted completion dates for each goal
     const goalData = goals.map(g => {
       const target = g.targetAmount || 0;
       const saved  = g.existingSavings || 0;
-      const monthsLeft = Math.max(Math.ceil((g.targetDate ? (new Date(g.targetDate) - now) / (1000*60*60*24*30) : 12)), 0);
-      const neededMonthly = monthsLeft > 0 ? (target - saved) / monthsLeft : target;
-      const affordability = income > 0 ? Math.min(neededMonthly / (income * 0.3), 1) : 0; // 30% of income
+      const remaining = Math.max(target - saved, 0);
+      const monthly = g.monthlyContribution || Math.max(monthlySurplus * 0.3, 0);
+      const monthsLeft = monthly > 0 ? Math.ceil(remaining / monthly) : null;
+      const predictedDate = monthsLeft != null
+        ? new Date(now.getFullYear(), now.getMonth() + monthsLeft, 1)
+        : null;
+      const formattedDate = predictedDate
+        ? predictedDate.toLocaleDateString('en-US', { month: 'short', year: 'numeric' })
+        : 'Unknown';
+
       return {
         name: g.name || g.goalType,
         target,
         saved,
+        remaining,
+        monthlyContribution: monthly,
         monthsLeft,
-        monthlyContribution: g.monthlyContribution || 0,
+        predictedCompletion: formattedDate,
         autoTransfer: g.autoTransfer,
         riskTolerance: g.riskTolerance || 'conservative',
-        affordability: affordability.toFixed(2)
       };
     });
 
@@ -3589,57 +3599,39 @@ You are a financial forecaster. Based on the user's real goals and financial dat
 
 User data:
 - Monthly income: $${income.toFixed(0)}
+- Monthly surplus: $${monthlySurplus.toFixed(0)}
 - Goals: ${JSON.stringify(goalData)}
 
 Output ONLY a JSON object with this exact structure:
-
 {
   "title": "Your Future",
   "subtitle": "Where your money is taking you",
   "goals": [
     {
-      "icon": "home",               // Material icon name (e.g., home, flight_takeoff, school, business_center)
+      "icon": "home",
       "title": "short goal title",
       "confidence": "High Confidence",
       "confidenceBgColor": "0xFFD1FAE5",
       "confidenceTextColor": "0xFF065F46",
-      "completion": "Mar 2026",
-      "completionExtra": "2 months early",   // optional, null if not applicable
+      "completion": "MONTH YEAR",   // use the provided predictedCompletion
+      "completionExtra": "2 months early",   // optional
       "completionColor": "0xFF059669",
-      "insight": "AI-generated insight 1-2 sentences",
+      "insight": "AI-generated insight",
       "insightBgColor": "0xFFD1FAE5",
       "insightIconColor": "0xFF059669",
-      "insightIcon": "security"     // Material icon name for the insight line
-    },
-    // second goal if present, otherwise null
+      "insightIcon": "security"
+    }
   ],
   "milestonesTitle": "Probability Milestones",
   "milestones": [
-    {
-      "title": "short milestone title (max 8 words)",
-      "probability": "85%",
-      "progress": 0.85,
-      "color": "green"             // "green" or "gold"
-    },
-    {
-      "title": "second milestone",
-      "probability": "62%",
-      "progress": 0.62,
-      "color": "gold"
-    },
-    {
-      "title": "third milestone",
-      "probability": "45%",
-      "progress": 0.45,
-      "color": "gold"
-    }
+    {"title": "Milestone 1", "probability": "85%", "progress": 0.85, "color": "green"},
+    {"title": "Milestone 2", "probability": "62%", "progress": 0.62, "color": "gold"},
+    {"title": "Milestone 3", "probability": "45%", "progress": 0.45, "color": "gold"}
   ],
-  "overallInsight": "2-3 sentences overall AI insight",
-  "footerText": "short disclaimer like 'Based on current spending habits and market trends. Not financial advice.'"
+  "overallInsight": "2-3 sentences",
+  "footerText": "short disclaimer"
 }
-
-Make the goal predictions realistic based on the affordability and savings rate. The milestones should be financial achievements (e.g., 'Emergency fund fully funded', 'Investment portfolio reaches $10k').
-Return ONLY the JSON.`.trim();
+Make completion dates strictly use the provided predictedCompletion. Return ONLY JSON.`.trim();
 
     let future;
     try {
@@ -3648,40 +3640,24 @@ Return ONLY the JSON.`.trim();
       if (!future.title || !future.goals) throw new Error('Incomplete AI response');
     } catch (err) {
       console.error('❌ AI failed for your-future:', err.message);
-      // Fallback with reasonable defaults
+      // Fallback with computed dates, not hardcoded
       future = {
         title: 'Your Future',
         subtitle: 'Where your money is taking you',
-        goals: [
-          {
-            icon: 'home',
-            title: goalData[0]?.name || 'Dream Home',
-            confidence: 'High Confidence',
-            confidenceBgColor: '0xFFD1FAE5',
-            confidenceTextColor: '0xFF065F46',
-            completion: 'Mar 2026',
-            completionExtra: 'on track',
-            completionColor: '0xFF059669',
-            insight: 'Based on your current savings rate, this goal is on track.',
-            insightBgColor: '0xFFD1FAE5',
-            insightIconColor: '0xFF059669',
-            insightIcon: 'security'
-          },
-          ...(goalData[1] ? [{
-            icon: 'flight_takeoff',
-            title: goalData[1].name || 'Vacation',
-            confidence: 'Moderate',
-            confidenceBgColor: '0xFFFEF3C7',
-            confidenceTextColor: '0xFFB45309',
-            completion: 'Sep 2025',
-            completionExtra: null,
-            completionColor: '0xFF1A1A2E',
-            insight: 'You may need to increase contributions slightly to stay on track.',
-            insightBgColor: '0xFFFEF3C7',
-            insightIconColor: '0xFFD97706',
-            insightIcon: 'warning'
-          }] : [])
-        ],
+        goals: goalData.map((g, idx) => ({
+          icon: idx === 0 ? 'home' : 'flight_takeoff',
+          title: g.name,
+          confidence: 'High Confidence',
+          confidenceBgColor: '0xFFD1FAE5',
+          confidenceTextColor: '0xFF065F46',
+          completion: g.predictedCompletion,
+          completionExtra: g.monthsLeft ? `${g.monthsLeft} months to go` : null,
+          completionColor: '0xFF059669',
+          insight: `You need $${g.monthlyContribution}/month to reach this goal.`,
+          insightBgColor: '0xFFD1FAE5',
+          insightIconColor: '0xFF059669',
+          insightIcon: 'security'
+        })),
         milestonesTitle: 'Probability Milestones',
         milestones: [
           { title: 'Emergency fund fully funded', probability: '85%', progress: 0.85, color: 'green' },
@@ -3699,9 +3675,6 @@ Return ONLY the JSON.`.trim();
     res.status(500).json({ error: err.message || 'Internal server error' });
   }
 });
-
-
-
 
 
 
@@ -6095,14 +6068,12 @@ app.get('/api/yearly-story', authenticate, async (req, res) => {
     const profile = await Profile.findOne({ userId: req.userId });
     if (!profile) return res.status(404).json({ error: 'Profile not found' });
 
-    // Compute real streak from habits
     const habits = await Habit.find({ userId: req.userId, active: true });
     let daysTracked = 0;
     for (const h of habits) {
-      daysTracked += computeStreak(h.checkIns); // total streak days
+      daysTracked += computeStreak(h.checkIns);
     }
 
-    // Total saved = income - expenses
     const totalSaved = (profile.primarySalary || 0) + (profile.sideIncome || 0) -
                        ((profile.rent || 0) + (profile.food || 0) +
                         (profile.transport || 0) + (profile.entertainment || 0) +
@@ -6113,9 +6084,9 @@ app.get('/api/yearly-story', authenticate, async (req, res) => {
     const goals = await Goal.find({ userId: req.userId });
     const goalsHit = goals.filter(g => g.existingSavings >= g.targetAmount).length;
 
-    const year = new Date().getFullYear(); // dynamic year
+    // Set year to next year to align with "Start 2027 Strong"
+    const year = new Date().getFullYear() + 1;
 
-    // AI generation (optional)
     let evolutionFrom = 'Uncertain Starter';
     let evolutionTo = 'Intentional Builder';
     let finalQuote = "This year you didn't just save money — you changed your relationship with it. That's the hardest part, and you've already done it.";
@@ -6141,6 +6112,18 @@ app.get('/api/yearly-story', authenticate, async (req, res) => {
       console.error('AI yearly story failed, using defaults:', err.message);
     }
 
+    // Dynamic achievements based on real daysTracked
+    const achievements = [
+      { title: 'Emergency Fund', subtitle: 'Complete', icon: 'check_circle', color: '#34d399' },
+      { title: 'Meal Prep', subtitle: 'Master', icon: 'restaurant', color: '#fbbd3f' },
+    ];
+
+    if (daysTracked >= 100) {
+      achievements.push({ title: '100-Day', subtitle: 'Streak', icon: 'trending_up', color: '#fb923c' });
+    } else {
+      achievements.push({ title: 'Early Days', subtitle: 'Just Started', icon: 'trending_up', color: '#fb923c' });
+    }
+
     const shareText = `In ${year}, I saved $${totalSaved} (${savingsRate}% savings rate), hit ${goalsHit} goals, and tracked ${daysTracked} days. Check out my Money Story!`;
 
     res.json({
@@ -6151,11 +6134,7 @@ app.get('/api/yearly-story', authenticate, async (req, res) => {
       goalsHit,
       evolutionFrom,
       evolutionTo,
-      achievements: [
-        { title: 'Emergency Fund', subtitle: 'Complete', icon: 'check_circle', color: '#34d399' },
-        { title: 'Meal Prep', subtitle: 'Master', icon: 'restaurant', color: '#fbbd3f' },
-        { title: '100-Day', subtitle: 'Streak', icon: 'trending_up', color: '#fb923c' },
-      ],
+      achievements,
       landmarkDate,
       landmarkDescription,
       finalQuote,
@@ -6166,7 +6145,6 @@ app.get('/api/yearly-story', authenticate, async (req, res) => {
     res.status(500).json({ error: err.message || 'Internal server error' });
   }
 });
-
 
 
 
